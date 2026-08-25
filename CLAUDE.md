@@ -27,6 +27,9 @@ Known traps, all hit in practice:
   column matrix (`fields` + `data` + `record_id_list`) rather than row objects.
 - `base +table-list` wants `--base-token` (not `--app-token`) and keys tables by `id`.
 - `docs +fetch` puts the body at `data.document.content`.
+- `drive +search` returns a *ranked slice*, not the corpus: an empty query yielded 260 hits
+  where the word 设计 alone yielded 400+. Coverage needs several probes unioned, plus the
+  wiki node list (`obj_token`), which is enumerated exhaustively — that took docs 260 -> 3861.
 - `im +chat-list` returns `chats`; members come from `+chat-members-list` as `users` + `bots`
   keyed by `member_id`, and need `im:chat.members:read` on top of `im:chat:read`.
 - `wiki +node-list` returns one level; recurse via `has_child` + `--parent-node-token`.

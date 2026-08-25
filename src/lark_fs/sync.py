@@ -203,11 +203,16 @@ def _record_sender(store: Store, msg: dict, known: set[str]):
         store.write_yaml(rel, {"open_id": oid, "name": sender.get("name", ""), "sender_type": sender.get("sender_type", ""), "tenant_key": sender.get("tenant_key", "")})
 
 
-async def sync_docs(store: Store, p: Progress, *, queries: list[str]):
-    """Cloud docs discovered via search, exported to markdown, plus comments."""
+# Drive search returns a ranked slice, not the corpus: an empty query yields far fewer
+# hits than a common word does, so coverage comes from unioning several probes.
+DOC_QUERIES = ["", "a", "e", "的", "会议", "设计", "项目", "需求", "方案", "数据", "模型", "文档", "记录", "计划"]
+
+
+async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None):
+    """Cloud docs discovered via search and via wiki nodes, exported to markdown, plus comments."""
     p.set("docs", state="running")
     seen: set[str] = set()
-    for q in queries:
+    for q in queries or DOC_QUERIES:
         try:
             async for r in cli.paginate("drive", "+search", "--query", q, key="results"):
                 meta = r.get("result_meta") or {}
@@ -219,6 +224,14 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str]):
                 p.bump("docs")
         except cli.LarkError:
             continue
+
+    # wiki nodes point at real documents and are enumerated exhaustively, unlike search
+    for space in (store.root / "wiki").glob("*/nodes.yaml"):
+        for node in store.read_yaml_rows(f"wiki/{space.parent.name}/nodes.yaml"):
+            if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
+                seen.add(token)
+                store.write_yaml(f"docs/{token}/meta.yaml", {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")})
+                p.bump("docs")
 
     # bodies are the expensive part -- only fetch ones missing from disk
     todo = [t for t in seen if not store.exists(f"docs/{t}/content.md")]
@@ -415,19 +428,20 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
         # but chats no longer depends on it succeeding -- a rate-limited message sweep
         # must not take the roster down with it
         chat_ids = await sync_messages(store, p) or set()
+    if "wiki" in want:
+        await sync_wiki(store, p)  # docs mines the node list for tokens search misses
+
     tasks = []
     if "chats" in want:
         tasks.append(sync_chat_meta(store, p, chat_ids))
     if "docs" in want:
-        tasks.append(sync_docs(store, p, queries=[""]))
+        tasks.append(sync_docs(store, p))
     if "minutes" in want:
         tasks.append(sync_minutes(store, p))
     if "meetings" in want:
         tasks.append(sync_meetings(store, p))
     if "bases" in want:
         tasks.append(sync_bases(store, p))
-    if "wiki" in want:
-        tasks.append(sync_wiki(store, p))
     await gather(*tasks)
     store.save_cursors()
     return store
