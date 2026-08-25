@@ -16,12 +16,7 @@ from prompt_toolkit.styles import Style
 from reactivity import effect
 
 from .cli import CONCURRENCY, in_flight
-from .sync import ALL, Progress
-
-
-class SyncAbortedError(Exception):
-    """Ctrl-C during a sync. Carries no traceback -- the caller just prints a note."""
-
+from .sync import ALL, Progress, SyncAbortedError
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 GLYPH = {"pending": "<dim>·</dim>", "running": "", "done": "<ok>✓</ok>", "error": "<err>✗</err>"}

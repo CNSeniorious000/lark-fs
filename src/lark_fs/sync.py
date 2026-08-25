@@ -24,6 +24,21 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S") + TZ
 
 
+class Aborted:
+    """Set when the user asks to stop; long walks check it between units of work."""
+
+    flag = False
+
+    @classmethod
+    def check(cls):
+        if cls.flag:
+            raise SyncAbortedError
+
+
+class SyncAbortedError(Exception):
+    """Cooperative stop: raised at a slice boundary so the cursor stays consistent."""
+
+
 class Progress:
     """Sync state as a reactive store; readers re-run automatically when a row changes.
 
@@ -67,6 +82,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
     known_users: set[str] = set()
 
     while start < end:
+        Aborted.check()
         stop = min(start + timedelta(hours=slice_hours), end)
         argv = ["im", "+messages-search", "--query", "", "--start", _iso(start), "--end", _iso(stop), "--page-all", "--no-reactions"]
         try:

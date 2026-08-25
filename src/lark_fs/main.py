@@ -4,12 +4,13 @@ from argparse import ArgumentParser
 from asyncio import run
 from os import environ
 from pathlib import Path
+from signal import SIGINT, SIGTERM, signal
 from sys import stderr
 
 from .reindex import reindex
 from .store import Store
-from .sync import ALL, sync_all
-from .tui import SyncAbortedError, print_summary, run_with_tui
+from .sync import ALL, Aborted, SyncAbortedError, sync_all
+from .tui import print_summary, run_with_tui
 
 
 def build_parser():
@@ -22,8 +23,19 @@ def build_parser():
     return p
 
 
+def _install_stop_handler():
+    """Without a TTY there is no key binding, so SIGINT/SIGTERM set the stop flag instead."""
+
+    def stop(*_):
+        Aborted.flag = True
+
+    for sig in (SIGINT, SIGTERM):
+        signal(sig, stop)
+
+
 def main():
     args = build_parser().parse_args()
+    _install_stop_handler()
     if args.command == "status":
         print_summary(Store(args.root))
         return
