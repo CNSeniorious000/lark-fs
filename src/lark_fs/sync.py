@@ -10,6 +10,7 @@ from asyncio import gather
 from datetime import UTC, datetime, timedelta
 from html import unescape
 from pathlib import Path
+from re import compile
 
 from reactivity import reactive
 
@@ -62,6 +63,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
     start = datetime.fromisoformat(cursor) if cursor else datetime.now(UTC) - timedelta(days=window_days)
     end = datetime.now(UTC)
     seen_chats: set[str] = set()
+    media: list[dict] = []
 
     while start < end:
         stop = min(start + timedelta(hours=slice_hours), end)
@@ -77,15 +79,18 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
                 thread = msg.get("thread_id")
                 rel = f"chats/{chat_id}/threads/{thread}/{mid}.yaml" if thread else f"chats/{chat_id}/messages/{month}/{mid}.yaml"
                 store.write_yaml(rel, _clean(msg))
-                _index_media(store, msg)
+                media += _index_media(msg)
                 p.bump("messages")
         except cli.LarkError as e:
             # keep whatever this run already committed; the next run picks up from `start`
+            _flush_media(store, media)
             store.cursors["messages"] = start.isoformat()
             store.save_cursors()
             p.set("messages", state="error", note=f"stopped at {start:%m-%d %H:%M}: {_reason(e)}")
             return seen_chats
 
+        _flush_media(store, media)
+        media.clear()
         start = stop
         store.cursors["messages"] = start.isoformat()
         store.save_cursors()
@@ -99,13 +104,29 @@ def _reason(e: cli.LarkError) -> str:
     return e.payload.get("error", {}).get("message", "failed") if isinstance(e.payload, dict) else "failed"
 
 
-def _index_media(store: Store, msg: dict):
-    """Record attachment/image references as URLs rather than downloading bytes."""
-    rows = []
-    for att in msg.get("attachments") or []:
-        rows.append({"message_id": msg.get("message_id"), "chat_id": msg.get("chat_id"), **att})
-    if rows:
-        store.append_yaml("media/index.yaml", rows)
+# media keys are embedded in the message body, not a separate field:
+#   text/post: `[Image: img_v3_...]`   file/media: `<file key="file_v3_..." name="..."/>`
+RE_MEDIA = compile(r'(?:\[(?:Image|Media|File|Video|Audio):\s*([a-z]+_v\d+_[\w-]+)\]|<\w+\s+key="([^"]+)"(?:\s+name="([^"]*)")?)')
+
+
+def _flush_media(store: Store, rows: list[dict]):
+    """Merge new media refs into each chat's index, keyed by media key so re-runs don't duplicate."""
+    by_chat: dict[str, list[dict]] = {}
+    for row in rows:
+        by_chat.setdefault(row["chat_id"], []).append(row)
+    for chat_id, new in by_chat.items():
+        rel = f"chats/{chat_id}/media.yaml"
+        merged = {r["key"]: r for r in store.read_yaml_rows(rel)} | {r["key"]: r for r in new}
+        store.write_yaml(rel, sorted(merged.values(), key=lambda r: r["create_time"]))
+
+
+def _index_media(msg: dict) -> list[dict]:
+    """Collect media references as keys/URLs. Bytes are never downloaded."""
+    rows = [
+        {"key": img or key, "name": name or "", "msg_type": msg.get("msg_type", ""), "message_id": msg.get("message_id"), "chat_id": msg.get("chat_id"), "create_time": msg.get("create_time", "")}
+        for img, key, name in RE_MEDIA.findall(msg.get("content") or "")
+    ]
+    return rows
 
 
 async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):

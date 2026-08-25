@@ -32,7 +32,7 @@ instead of being buried in `\n` escapes.
 <root>/
   .lark-fs/cursors.json               # per-collection incremental cursors
   chats/<chat_id>/
-    meta.yaml  members.yaml
+    meta.yaml  members.yaml  media.yaml    # image/file keys referenced by this chat
     messages/<YYYY-MM>/<message_id>.yaml
     threads/<thread_id>/<message_id>.yaml
   users/<open_id>/meta.yaml
@@ -41,7 +41,6 @@ instead of being buried in `\n` escapes.
   meetings/<meeting_id>/{meta.yaml,detail.yaml}    # detail.yaml links minute_token / note_id
   bases/<app_token>/tables/<table_id>/{meta.yaml,records.yaml}
   wiki/<space_id>/{meta.yaml,nodes.yaml}
-  media/index.yaml                    # attachments/images as URLs; bytes are never downloaded
 ```
 
 ## Incrementality

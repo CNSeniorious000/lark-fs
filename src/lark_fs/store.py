@@ -13,6 +13,7 @@ plain lines instead of being buried in \n escapes.
       chats/<chat_id>/
         meta.yaml
         members.yaml
+        media.yaml               # image/file keys seen in this chat; bytes are never downloaded
         messages/<YYYY-MM>/<message_id>.yaml
         threads/<thread_id>/<message_id>.yaml
       users/<open_id>/meta.yaml
@@ -21,7 +22,6 @@ plain lines instead of being buried in \n escapes.
       meetings/<meeting_id>/meta.yaml
       bases/<app_token>/tables/<table_id>/{meta.yaml,records.yaml}
       wiki/<space_id>/{meta.yaml,nodes.yaml}
-      media/index.yaml           # url references; media bytes are never downloaded
 """
 
 from json import dumps, loads
@@ -60,6 +60,26 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as f:
             f.write(readable_yaml_dumps(rows))
+
+    def read_yaml_rows(self, rel: str) -> list[dict]:
+        """Read back a YAML sequence this store wrote. Only handles the flat `- key: value`
+        shape used by the media index -- enough to merge across runs without a YAML parser."""
+        path = self.root / rel
+        if not path.exists():
+            return []
+        rows: list[dict] = []
+        for line in path.read_text().splitlines():
+            if line.startswith("- "):
+                rows.append({})
+                line = line[2:]
+            elif line.startswith("  "):
+                line = line[2:]
+            else:
+                continue
+            key, _, value = line.partition(": ")
+            if rows and key:
+                rows[-1][key] = value.strip().strip("'")
+        return rows
 
     def exists(self, rel: str) -> bool:
         return (self.root / rel).exists()
