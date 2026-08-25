@@ -64,6 +64,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
     end = datetime.now(UTC)
     seen_chats: set[str] = set()
     media: list[dict] = []
+    known_users: set[str] = set()
 
     while start < end:
         stop = min(start + timedelta(hours=slice_hours), end)
@@ -80,6 +81,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
                 rel = f"chats/{chat_id}/threads/{thread}/{mid}.yaml" if thread else f"chats/{chat_id}/messages/{month}/{mid}.yaml"
                 store.write_yaml(rel, _clean(msg))
                 media += _index_media(msg)
+                _record_sender(store, msg, known_users)
                 p.bump("messages")
         except cli.LarkError as e:
             # keep whatever this run already committed; the next run picks up from `start`
@@ -152,6 +154,19 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
 
     await gather(*(one(c) for c in todo))
     p.set("chats", state="done")
+
+
+def _record_sender(store: Store, msg: dict, known: set[str]):
+    """Senders carry their own name and open_id, so a usable user directory can be built
+    from messages alone -- `+chat-members-list` needs im:chat:read, which may not be granted."""
+    sender = msg.get("sender") or {}
+    oid = sender.get("open_bot_id") or (sender.get("id") if sender.get("id_type") == "open_id" else None)
+    if not oid or oid in known:
+        return
+    known.add(oid)
+    rel = f"users/{oid}/meta.yaml"
+    if not store.exists(rel):
+        store.write_yaml(rel, {"open_id": oid, "name": sender.get("name", ""), "sender_type": sender.get("sender_type", ""), "tenant_key": sender.get("tenant_key", "")})
 
 
 async def sync_docs(store: Store, p: Progress, *, queries: list[str]):
