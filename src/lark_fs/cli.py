@@ -1,6 +1,6 @@
 """Thin async wrapper around the `lark-cli` binary."""
 
-from asyncio import CancelledError, Semaphore, create_subprocess_exec, sleep, subprocess
+from asyncio import CancelledError, Semaphore, create_subprocess_exec, create_task, sleep, subprocess
 from contextlib import suppress
 from itertools import count, pairwise
 from json import JSONDecoder
@@ -124,19 +124,46 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
     raise AssertionError("unreachable")
 
 
-async def paginate(*argv: str, key: str, page_size: int = 20):
-    """Yield items across pages for shortcuts exposing --page-token/--page-size."""
+async def paginate(*argv: str, key: str, page_size: int = 20, prefetch: bool = False):
+    """Yield items across pages for shortcuts exposing --page-token/--page-size.
+
+    With `prefetch`, the next page is requested while the current one is still being
+    consumed. A page arrives in milliseconds but the next request takes a second or
+    two, so without this the caller does all its work in one burst and then idles --
+    which reads as a frozen counter rather than steady progress.
+    """
     token = None
+    data = None
     while True:
-        extra = ["--page-size", str(page_size), *(["--page-token", token] if token else [])]
-        try:
-            data = await run(*argv, *extra)
-        except LarkError as e:
-            if e.is_pagination_exhausted:
-                return
-            raise
-        for item in data.get(key) or []:
-            yield item
+        if data is None:
+            extra = ["--page-size", str(page_size), *(["--page-token", token] if token else [])]
+            try:
+                data = await run(*argv, *extra)
+            except LarkError as e:
+                if e.is_pagination_exhausted:
+                    return
+                raise
+        items = data.get(key) or []
         token = data.get("page_token")
-        if not token or not data.get("has_more"):
+        more = bool(token and data.get("has_more"))
+
+        if prefetch and more:
+            # kick off the next request first, then hand out this page while it flies
+            extra = ["--page-size", str(page_size), "--page-token", token]
+            upcoming = create_task(run(*argv, *extra))
+            pace = 1.0 / (len(items) or 1)  # spread this page across roughly one request
+            for item in items:
+                yield item
+                await sleep(pace)
+            try:
+                data = await upcoming
+            except LarkError as e:
+                if e.is_pagination_exhausted:
+                    return
+                raise
+            continue
+
+        for item in items:
+            yield item
+        if not more:
             return

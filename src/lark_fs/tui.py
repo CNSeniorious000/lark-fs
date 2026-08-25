@@ -110,8 +110,8 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
 
     async def spin():
         while True:
-            await sleep(0.08)
-            frame.set(next(SPINNER))
+            await sleep(0.05)
+            frame.set(next(SPINNER))  # also paces repaints: counters advance faster than any refresh rate
 
     worker = None
 

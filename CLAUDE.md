@@ -53,6 +53,11 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
   bodies stay greppable as plain lines. Never write JSON for entity data.
 - `Progress` rows are reactive: replace the whole row dict, never mutate in place, or
   subscribers are not notified.
+- Progress that looks frozen is usually pacing, not rendering: a page of 20 messages is
+  written in ~6ms and then the next request takes ~1.8s. `paginate(prefetch=True)` starts
+  the next request first and spreads the current page across its flight time, so counters
+  advance steadily. Measure repaints by counting PTY writes — matching whole lines misses
+  partial redraws and makes a live UI look dead.
 - The TUI repaints from a `@effect` subscribing to a `@derived` view, with
   `refresh_interval=0` — no polling. Create that effect only after `run_async` has
   started: `Application.invalidate()` is a no-op while the app is not running.

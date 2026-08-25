@@ -6,7 +6,7 @@ Search-backed collections (docs/minutes/meetings) have no server-side cursor, so
 they re-list metadata (cheap) but skip fetching bodies for entities already on disk.
 """
 
-from asyncio import gather
+from asyncio import gather, sleep
 from datetime import UTC, datetime, timedelta
 from html import unescape
 from pathlib import Path
@@ -53,11 +53,12 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
     needs the search scope and covers every chat the user can see, so it is the
     primary path. Each message lands under its chat, partitioned by month.
 
-    Two constraints shape this loop. `--page-all` caps at 40 pages (800 messages),
-    so a wide window silently truncates; and the endpoint rate-limits hard enough
-    that a run *will* be cut short. So we advance in small slices and commit the
-    cursor after each one -- an interrupted run resumes where it stopped instead
-    of discarding everything it already wrote.
+    Two constraints shape this loop. The endpoint's own `--page-all` caps at 40 pages
+    (800 messages) and returns them in one blocking call, so we page it ourselves --
+    that lifts the cap and lets progress tick per page instead of jumping. And it
+    rate-limits hard enough that a run *will* be cut short, so we advance in small
+    slices and commit the cursor after each one: an interrupted run resumes where it
+    stopped instead of discarding everything it already wrote.
     """
     p.set("messages", state="running")
     cursor = store.cursors.get("messages")
@@ -71,9 +72,9 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
         Aborted.check()
         stop = min(start + timedelta(hours=slice_hours), end)
         p.set("messages", state="running", note=f"{start:%m-%d %H:%M}")
-        argv = ["im", "+messages-search", "--query", "", "--start", _iso(start), "--end", _iso(stop), "--page-all", "--no-reactions"]
+        argv = ["im", "+messages-search", "--query", "", "--start", _iso(start), "--end", _iso(stop), "--no-reactions"]
         try:
-            async for msg in cli.paginate(*argv, key="messages"):
+            async for msg in cli.paginate(*argv, key="messages", prefetch=True):
                 chat_id, mid = msg.get("chat_id"), msg.get("message_id")
                 if not chat_id or not mid:
                     continue
@@ -86,6 +87,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
                 media += _index_media(msg)
                 _record_sender(store, msg, known_users)
                 p.bump("messages")
+                await sleep(0)  # keep the UI responsive; repaint rate is the TUI's concern
         except cli.LarkError as e:
             # keep whatever this run already committed; the next run picks up from `start`
             _flush_media(store, media)
