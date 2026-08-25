@@ -1,6 +1,7 @@
 """pnpm-style inline progress: a few lines redrawn in place, no alternate screen."""
 
 from asyncio import create_task, gather, sleep
+from contextlib import suppress
 from itertools import cycle
 from sys import stderr
 from xml.sax.saxutils import escape
@@ -16,6 +17,11 @@ from reactivity import effect
 
 from .cli import CONCURRENCY, in_flight
 from .sync import ALL, Progress
+
+
+class SyncAbortedError(Exception):
+    """Ctrl-C during a sync. Carries no traceback -- the caller just prints a note."""
+
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 GLYPH = {"pending": "<dim>·</dim>", "running": "", "done": "<ok>✓</ok>", "error": "<err>✗</err>"}
@@ -78,9 +84,14 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     body = Window(FormattedTextControl(render), height=len(rows) + CONCURRENCY, dont_extend_height=True, always_hide_cursor=True)
     kb = KeyBindings()
 
+    interrupted = False
+
     @kb.add("c-c")
     def _(event):
-        event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+        nonlocal interrupted
+        interrupted = True
+        worker.cancel()
+        event.app.exit()
 
     # full_screen=False keeps us on the normal buffer, so the final frame stays in scrollback
     app = Application(layout=Layout(HSplit([body])), key_bindings=kb, style=STYLE, full_screen=False, color_depth=ColorDepth.TRUE_COLOR, refresh_interval=0.08)
@@ -92,6 +103,8 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
             frame = next(SPINNER)
             app.invalidate()
 
+    worker = None
+
     async def work():
         try:
             return await coro_factory(progress)
@@ -99,10 +112,15 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
             app.exit()
 
     ticker = create_task(tick())
+    worker = create_task(work())
     try:
-        _, result = await gather(app.run_async(), work())
+        _, result = await gather(app.run_async(), worker, return_exceptions=True)
     finally:
         ticker.cancel()
+        with suppress(BaseException):
+            await ticker
+    if interrupted or isinstance(result, BaseException):
+        raise SyncAbortedError
     return result
 
 

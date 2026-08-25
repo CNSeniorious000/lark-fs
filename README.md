@@ -72,10 +72,16 @@ lark-fs reindex --root lark-data
 
 ## Setup
 
-Needs `lark-cli` on PATH and authorized. Message enumeration uses the global search
-endpoint rather than chat listing, so it works without `im:chat:read`; grant that scope
-to also capture chat metadata and membership:
+Needs `lark-cli` on PATH and authorized with:
 
 ```sh
-lark-cli auth login --scope "im:chat:read"
+lark-cli auth login --scope "im:chat:read im:chat.members:read"
 ```
+
+Both are optional — messages come from the global search endpoint, so a sync still works
+without them; they add chat listing (including quiet chats the message sweep never sees)
+and the member roster that populates `users/`.
+
+The store defaults to `~/lark-data` rather than `./lark-data`, so running from different
+directories keeps one store instead of scattering copies. Override with `--root` or
+`LARK_FS_ROOT`.

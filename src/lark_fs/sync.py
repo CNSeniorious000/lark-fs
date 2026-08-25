@@ -132,28 +132,46 @@ def _index_media(msg: dict) -> list[dict]:
 
 
 async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
-    """Chat metadata + membership. Only for chats we have not recorded yet."""
-    todo = [c for c in chat_ids if not store.exists(f"chats/{c}/meta.yaml")]
-    p.set("chats", state="running", total=len(todo))
+    """Chat metadata + membership for every chat the user belongs to.
+
+    `+chat-list` covers chats that have said nothing in the synced window, so it finds
+    more than the message sweep does; ids seen in messages are unioned in on top.
+    """
+    p.set("chats", state="running")
+    listed: dict[str, dict] = {}
+    try:
+        async for chat in cli.paginate("im", "+chat-list", "--types", "p2p,group", key="chats"):
+            if cid := chat.get("chat_id"):
+                listed[cid] = chat
+    except cli.LarkError:
+        pass  # without im:chat:read we still have whatever the messages revealed
+
+    todo = [c for c in listed.keys() | chat_ids if not store.exists(f"chats/{c}/members.yaml")]
+    p.set("chats", total=len(todo))
     if not todo:
-        p.set("chats", state="done", note="up to date")
+        p.set("chats", state="done", note=f"{len(listed)} known, up to date")
         return
 
     async def one(chat_id: str):
         try:
             meta = await cli.run("im", "chats", "get", "--chat-id", chat_id)
-            store.write_yaml(f"chats/{chat_id}/meta.yaml", meta)
-            members = await cli.run("im", "+chat-members-list", "--chat-id", chat_id, "--page-all")
-            store.write_yaml(f"chats/{chat_id}/members.yaml", members)
-            for u in (members or {}).get("users") or []:
-                if oid := u.get("member_id") or u.get("open_id"):
-                    store.write_yaml(f"users/{oid}/meta.yaml", u)
+            store.write_yaml(f"chats/{chat_id}/meta.yaml", _clean(meta))
         except cli.LarkError:
-            pass  # a chat we can see messages in but not its metadata; the messages are still synced
+            if base := listed.get(chat_id):
+                store.write_yaml(f"chats/{chat_id}/meta.yaml", _clean(base))
+        try:
+            members = await cli.run("im", "+chat-members-list", "--chat-id", chat_id, "--page-all")
+        except cli.LarkError:
+            p.bump("chats")
+            return
+        store.write_yaml(f"chats/{chat_id}/members.yaml", _clean(members))
+        for u in ((members or {}).get("users") or []) + ((members or {}).get("bots") or []):
+            if oid := u.get("member_id") or u.get("open_id"):
+                store.write_yaml(f"users/{oid}/meta.yaml", _clean({"open_id": oid, **u}))
         p.bump("chats")
 
     await gather(*(one(c) for c in todo))
-    p.set("chats", state="done")
+    p.set("chats", state="done", note=f"{len(listed)} listed")
 
 
 def _record_sender(store: Store, msg: dict, known: set[str]):

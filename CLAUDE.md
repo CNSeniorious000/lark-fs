@@ -27,6 +27,8 @@ Known traps, all hit in practice:
   column matrix (`fields` + `data` + `record_id_list`) rather than row objects.
 - `base +table-list` wants `--base-token` (not `--app-token`) and keys tables by `id`.
 - `docs +fetch` puts the body at `data.document.content`.
+- `im +chat-list` returns `chats`; members come from `+chat-members-list` as `users` + `bots`
+  keyed by `member_id`, and need `im:chat.members:read` on top of `im:chat:read`.
 - `wiki +node-list` returns one level; recurse via `has_child` + `--parent-node-token`.
 - `minutes +detail --transcript` writes `<cwd>/minutes/<token>/transcript.txt` itself
   instead of returning it, so it must run with `cwd` set to the store root.

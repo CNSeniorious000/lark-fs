@@ -2,18 +2,22 @@
 
 from argparse import ArgumentParser
 from asyncio import run
+from os import environ
 from pathlib import Path
+from sys import stderr
 
 from .reindex import reindex
 from .store import Store
 from .sync import ALL, sync_all
-from .tui import print_summary, run_with_tui
+from .tui import SyncAbortedError, print_summary, run_with_tui
 
 
 def build_parser():
     p = ArgumentParser(prog="lark-fs", description="Mirror Feishu/Lark into a greppable file tree.")
     p.add_argument("command", choices=["sync", "status", "reindex"], nargs="?", default="sync")
-    p.add_argument("--root", type=Path, default=Path.cwd() / "lark-data", help="destination directory")
+    # a fixed default keeps one store instead of scattering `lark-data/` wherever it was run
+    default_root = Path(environ.get("LARK_FS_ROOT") or Path.home() / "lark-data")
+    p.add_argument("--root", type=Path, default=default_root, help=f"destination directory (default: {default_root})")
     p.add_argument("--only", nargs="+", choices=ALL, help="sync only these collections")
     return p
 
@@ -29,7 +33,13 @@ def main():
         print(f"  scanned {counts['messages']} messages -> {counts['users']} users, {counts['media']} media refs{broken}")
         print_summary(Store(args.root))
         return
-    store = run(run_with_tui(lambda p: sync_all(args.root, p, args.only), args.only))
+    try:
+        store = run(run_with_tui(lambda p: sync_all(args.root, p, args.only), args.only))
+    except (SyncAbortedError, KeyboardInterrupt):
+        # cursors are committed per slice, so an interrupted run just resumes next time
+        print("\n  interrupted; rerun to resume", file=stderr)
+        print_summary(Store(args.root))
+        return
     print_summary(store)
 
 

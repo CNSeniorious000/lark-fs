@@ -1,6 +1,7 @@
 """Thin async wrapper around the `lark-cli` binary."""
 
-from asyncio import Semaphore, create_subprocess_exec, sleep, subprocess
+from asyncio import CancelledError, Semaphore, create_subprocess_exec, sleep, subprocess
+from contextlib import suppress
 from itertools import count, pairwise
 from json import loads
 from typing import Any
@@ -65,6 +66,11 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
             try:
                 proc = await create_subprocess_exec(*args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
                 out, stderr = await proc.communicate()
+            except CancelledError:
+                # ctrl-c: kill the child instead of letting its pending read surface as an unhandled error
+                with suppress(ProcessLookupError, UnboundLocalError):
+                    proc.kill()
+                raise
             finally:
                 del in_flight[rid]
         payload = _parse(out.decode(errors="replace"))
