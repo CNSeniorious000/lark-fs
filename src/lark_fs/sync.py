@@ -395,10 +395,13 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     want = set(only or ALL)
     chat_ids: set[str] = set()
     if "messages" in want:
+        # runs first so chats can pick up ids from conversations `+chat-list` misses,
+        # but chats no longer depends on it succeeding -- a rate-limited message sweep
+        # must not take the roster down with it
         chat_ids = await sync_messages(store, p) or set()
-    if "chats" in want and chat_ids:
-        await sync_chat_meta(store, p, chat_ids)
     tasks = []
+    if "chats" in want:
+        tasks.append(sync_chat_meta(store, p, chat_ids))
     if "docs" in want:
         tasks.append(sync_docs(store, p, queries=[""]))
     if "minutes" in want:
