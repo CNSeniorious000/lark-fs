@@ -3,10 +3,11 @@
 from asyncio import CancelledError, Semaphore, create_subprocess_exec, sleep, subprocess
 from contextlib import suppress
 from itertools import count, pairwise
-from json import loads
+from json import JSONDecoder
+from re import compile
 from typing import Any
 
-CONCURRENCY = 4  # lark's open API rate-limits aggressively; keep this low
+CONCURRENCY = 3  # lark's open API rate-limits aggressively; keep this low
 _sem = Semaphore(CONCURRENCY)
 
 in_flight: dict[int, str] = {}  # request id -> label, so the TUI can show what is being fetched
@@ -23,6 +24,9 @@ def _label(argv: tuple[str, ...]) -> str:
     ids = (v for f, v in pairwise(argv) if f.startswith("--") and not v.startswith("--"))
     subject = next((v for v in ids if not v.isdigit() or len(v) > 8), "")
     return f"{head} {subject}".strip()
+
+
+RE_CODE = compile(r'"code":\s*(\d+)')
 
 
 class Aborted:
@@ -51,21 +55,38 @@ class LarkError(Exception):
         return (self.payload or {}).get("error", {}).get("missing_scopes", []) if isinstance(self.payload, dict) else []
 
     @property
+    def _code(self) -> int | None:
+        """lark-cli sometimes truncates its error JSON mid-object, so the structured code
+        is unavailable and the raw text is all we have. Read it from whichever survives."""
+        err = self.payload.get("error", {}) if isinstance(self.payload, dict) else {}
+        if isinstance(err.get("code"), int):
+            return err["code"]
+        found = RE_CODE.search(str(err.get("message", "")))
+        return int(found[1]) if found else None
+
+    @property
+    def is_pagination_exhausted(self):
+        """121022: the endpoint refuses to page further. Expected on wide windows --
+        it means "that's all you get here", not that the collection failed."""
+        return self._code == 121022
+
+    @property
     def is_rate_limited(self):
-        if not isinstance(self.payload, dict):
-            return False
-        err = self.payload.get("error", {})
         # 99991400 is Lark's "request trigger frequency limit"; the subtype spelling varies by endpoint
-        return err.get("code") == 99991400 or "rate_limit" in str(err.get("subtype", ""))
+        return self._code == 99991400 or "rate_limit" in str(self.payload)
 
 
 def _parse(text: str) -> Any | None:
-    """lark-cli prefixes some shortcuts with progress lines; the JSON body starts at a bare `{`."""
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if line.startswith("{"):
+    """Extract lark-cli's JSON body.
+
+    Some shortcuts print progress lines before it and trailing output after it, so decode
+    the first complete object rather than requiring the whole tail to be valid JSON --
+    otherwise a truncated trailer turns a structured API error into an opaque blob.
+    """
+    for i, ch in enumerate(text):
+        if ch == "{":
             try:
-                return loads("\n".join(lines[i:]))
+                return JSONDecoder().raw_decode(text, i)[0]
             except ValueError:
                 continue
     return None
@@ -108,7 +129,12 @@ async def paginate(*argv: str, key: str, page_size: int = 20):
     token = None
     while True:
         extra = ["--page-size", str(page_size), *(["--page-token", token] if token else [])]
-        data = await run(*argv, *extra)
+        try:
+            data = await run(*argv, *extra)
+        except LarkError as e:
+            if e.is_pagination_exhausted:
+                return
+            raise
         for item in data.get(key) or []:
             yield item
         token = data.get("page_token")

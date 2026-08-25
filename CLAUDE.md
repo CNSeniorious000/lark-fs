@@ -53,6 +53,9 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
   bodies stay greppable as plain lines. Never write JSON for entity data.
 - `Progress` rows are reactive: replace the whole row dict, never mutate in place, or
   subscribers are not notified.
+- The TUI repaints from a `@effect` subscribing to a `@derived` view, with
+  `refresh_interval=0` — no polling. Create that effect only after `run_async` has
+  started: `Application.invalidate()` is a no-op while the app is not running.
 - Interruption is handled in `cli.run`, so every request is a cancellation point. Do not
   add per-loop stop checks in syncers — that approach already missed half of them.
 - Rate limits are certain, not hypothetical. Anything that walks a long range must

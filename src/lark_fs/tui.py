@@ -1,6 +1,6 @@
 """pnpm-style inline progress: a few lines redrawn in place, no alternate screen."""
 
-from asyncio import create_task, gather, sleep
+from asyncio import Event, Future, create_task, gather, sleep
 from contextlib import suppress
 from itertools import cycle
 from sys import stderr
@@ -13,7 +13,7 @@ from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
-from reactivity import effect
+from reactivity import derived, effect, signal
 
 from .cli import CONCURRENCY, SyncAbortedError, in_flight
 from .sync import ALL, Progress
@@ -61,24 +61,25 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     if not stderr.isatty():
         return await run_plain(coro_factory, names)
 
-    app: Application | None = None
+    rows = names or ALL
+    app_started = Event()
+    never = Future()
     progress = Progress()
-    for name in names or ALL:
+    for name in rows:
         progress.set(name, state="pending")
 
-    frame = next(SPINNER)
+    frame = signal(next(SPINNER))
 
-    rows = names or ALL
-
-    def render():
+    @derived
+    def view():
+        """Tracks progress.rows and the spinner, so the effect below knows when to redraw."""
         width = get_app().output.get_size().columns
-        lines = [_line(progress.rows[n], frame) for n in rows if n in progress.rows]
+        lines = [_line(progress.rows[n], frame.get()) for n in rows if n in progress.rows]
         return HTML("\n".join(lines + _fetching(width)))
 
     # height must cover the collection rows plus every concurrent request line
-    body = Window(FormattedTextControl(render), height=len(rows) + CONCURRENCY, dont_extend_height=True, always_hide_cursor=True)
+    body = Window(FormattedTextControl(view), height=len(rows) + CONCURRENCY, dont_extend_height=True, always_hide_cursor=True)
     kb = KeyBindings()
-
     interrupted = False
 
     @kb.add("c-c")
@@ -88,15 +89,29 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
         worker.cancel()
         event.app.exit()
 
-    # full_screen=False keeps us on the normal buffer, so the final frame stays in scrollback
-    app = Application(layout=Layout(HSplit([body])), key_bindings=kb, style=STYLE, full_screen=False, color_depth=ColorDepth.TRUE_COLOR, refresh_interval=0.08)
+    # full_screen=False keeps us on the normal buffer, so the final frame stays in scrollback;
+    # refresh_interval=0 because redraws are driven by the effect below, not by polling
+    app = Application(layout=Layout(HSplit([body])), key_bindings=kb, style=STYLE, full_screen=False, color_depth=ColorDepth.TRUE_COLOR, refresh_interval=0)
 
-    async def tick():
-        nonlocal frame
+    async def repaint_on_change():
+        # `Application.invalidate` is a no-op until the app is actually running, so the
+        # subscription has to be created after run_async has started, not before.
+        await app_started.wait()
+
+        @effect
+        def redraw():
+            view()  # subscribe: any progress row or spinner change schedules a repaint
+            app.invalidate()
+
+        try:
+            await never
+        finally:
+            redraw.dispose()
+
+    async def spin():
         while True:
             await sleep(0.08)
-            frame = next(SPINNER)
-            app.invalidate()
+            frame.set(next(SPINNER))
 
     worker = None
 
@@ -106,15 +121,23 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
         finally:
             app.exit()
 
-    ticker = create_task(tick())
+    async def ui():
+        try:
+            return await app.run_async(pre_run=app_started.set)
+        finally:
+            painter.cancel()
+
+    ticker = create_task(spin())
+    painter = create_task(repaint_on_change())
     worker = create_task(work())
     try:
-        _, result = await gather(app.run_async(), worker, return_exceptions=True)
+        _, result = await gather(ui(), worker, return_exceptions=True)
     finally:
         ticker.cancel()
+        painter.cancel()
         # let both tasks finish unwinding before the loop closes, or a cancelled
         # subprocess transport gets reaped afterwards and prints "Loop ... is closed"
-        for task in (ticker, worker):
+        for task in (ticker, painter, worker):
             with suppress(BaseException):
                 await task
     if interrupted or isinstance(result, BaseException):

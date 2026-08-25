@@ -276,8 +276,9 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
                 if token := item.get("token"):
                     found[token] = item
         except cli.LarkError as e:
-            p.set("minutes", state="error", note=_reason(e))
-            return
+            if not e.is_pagination_exhausted:
+                p.set("minutes", state="error", note=_reason(e))
+                return
         month = nxt
 
     p.set("minutes", total=len(found))
@@ -327,8 +328,9 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
                     store.write_yaml(f"meetings/{mid}/meta.yaml", _clean(item))
                     p.bump("meetings")
         except cli.LarkError as e:
-            p.set("meetings", state="error", note=_reason(e))
-            return
+            if not e.is_pagination_exhausted:
+                p.set("meetings", state="error", note=_reason(e))
+                return
         month = nxt
 
     todo = [i for i in ids if not store.exists(f"meetings/{i}/detail.yaml")]
@@ -395,21 +397,33 @@ async def sync_wiki(store: Store, p: Progress):
     items = (spaces or {}).get("spaces") or []
     p.set("wiki", total=len(items))
 
-    async def walk(sid: str, parent: str | None = None) -> list[dict]:
-        """Wiki nodes form a tree; +node-list only returns one level, so recurse into has_child."""
+    async def level(sid: str, parent: str | None) -> list[dict]:
         argv = ["wiki", "+node-list", "--space-id", sid, "--page-all", *(["--parent-node-token", parent] if parent else [])]
         try:
-            data = await cli.run(*argv)
+            return ((await cli.run(*argv)) or {}).get("nodes") or []
         except cli.LarkError:
             return []
-        nodes = (data or {}).get("nodes") or []
-        children = await gather(*(walk(sid, n["node_token"]) for n in nodes if n.get("has_child")))
-        return nodes + [n for group in children for n in group]
+
+    async def walk(sid: str) -> list[dict]:
+        """Wiki nodes form a tree and `+node-list` returns one level at a time.
+
+        Breadth-first with a bounded fan-out per round: recursing with `gather` queues the
+        whole subtree at once, which floods the API into a rate limit even though the
+        semaphore caps what runs concurrently.
+        """
+        found: list[dict] = []
+        frontier = [None]
+        while frontier:
+            batch, frontier = frontier[:cli.CONCURRENCY], frontier[cli.CONCURRENCY:]
+            for nodes in await gather(*(level(sid, parent) for parent in batch)):
+                found += nodes
+                frontier += [n["node_token"] for n in nodes if n.get("has_child")]
+        return found
 
     async def one(space: dict):
         sid = space.get("space_id")
         store.write_yaml(f"wiki/{sid}/meta.yaml", space)
-        store.write_yaml(f"wiki/{sid}/nodes.yaml", await walk(sid))
+        store.write_yaml(f"wiki/{sid}/nodes.yaml", _clean(await walk(sid)))
         p.bump("wiki")
 
     await gather(*(one(s) for s in items))
