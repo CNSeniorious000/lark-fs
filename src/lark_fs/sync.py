@@ -15,6 +15,7 @@ from re import compile
 from reactivity import reactive
 
 from . import cli
+from .cli import Aborted
 from .store import Store
 
 TZ = "+08:00"
@@ -22,21 +23,6 @@ TZ = "+08:00"
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S") + TZ
-
-
-class Aborted:
-    """Set when the user asks to stop; long walks check it between units of work."""
-
-    flag = False
-
-    @classmethod
-    def check(cls):
-        if cls.flag:
-            raise SyncAbortedError
-
-
-class SyncAbortedError(Exception):
-    """Cooperative stop: raised at a slice boundary so the cursor stays consistent."""
 
 
 class Progress:

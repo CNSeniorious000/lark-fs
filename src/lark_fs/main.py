@@ -7,9 +7,10 @@ from pathlib import Path
 from signal import SIGINT, SIGTERM, signal
 from sys import stderr
 
+from .cli import Aborted, SyncAbortedError
 from .reindex import reindex
 from .store import Store
-from .sync import ALL, Aborted, SyncAbortedError, sync_all
+from .sync import ALL, sync_all
 from .tui import print_summary, run_with_tui
 
 

@@ -25,6 +25,22 @@ def _label(argv: tuple[str, ...]) -> str:
     return f"{head} {subject}".strip()
 
 
+class Aborted:
+    """Cooperative stop. Every request is a checkpoint, so a sync interrupts promptly
+    no matter which collection is running."""
+
+    flag = False
+
+    @classmethod
+    def check(cls):
+        if cls.flag:
+            raise SyncAbortedError
+
+
+class SyncAbortedError(Exception):
+    """Raised at a request boundary once a stop has been requested."""
+
+
 class LarkError(Exception):
     def __init__(self, argv: list[str], payload: Any):
         self.argv, self.payload = argv, payload
@@ -57,6 +73,7 @@ def _parse(text: str) -> Any | None:
 
 async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
     """Run a lark-cli command expecting JSON on stdout. Returns the `data` field."""
+    Aborted.check()
     args = ["lark-cli", *argv, "--format", "json"]
     delay = 2.0
     for attempt in range(retries):

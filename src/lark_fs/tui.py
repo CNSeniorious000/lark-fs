@@ -15,8 +15,8 @@ from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
 from reactivity import effect
 
-from .cli import CONCURRENCY, in_flight
-from .sync import ALL, Progress, SyncAbortedError
+from .cli import CONCURRENCY, SyncAbortedError, in_flight
+from .sync import ALL, Progress
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 GLYPH = {"pending": "<dim>·</dim>", "running": "", "done": "<ok>✓</ok>", "error": "<err>✗</err>"}

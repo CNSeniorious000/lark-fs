@@ -53,5 +53,7 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
   bodies stay greppable as plain lines. Never write JSON for entity data.
 - `Progress` rows are reactive: replace the whole row dict, never mutate in place, or
   subscribers are not notified.
+- Interruption is handled in `cli.run`, so every request is a cancellation point. Do not
+  add per-loop stop checks in syncers — that approach already missed half of them.
 - Rate limits are certain, not hypothetical. Anything that walks a long range must
   commit its cursor incrementally so an interrupted run resumes instead of restarting.
