@@ -7,6 +7,7 @@ built on top of an already-logged-in [`lark-cli`](https://github.com/larksuite/c
 m sync                      # incremental sync of everything
 m sync --only messages docs # just these collections
 m lark-status               # counts per collection, no network
+lark-fs reindex             # rebuild users/ and media.yaml from messages on disk, no network
 ```
 
 ## Why a file tree
@@ -59,6 +60,15 @@ The TUI shows one line per collection plus a live, bun-style list of the request
 currently on the wire. It stays on the normal screen buffer, so the final frame
 remains in scrollback. Piping to a non-TTY falls back to one line per completed
 collection, so CI still sees progress.
+
+## Reindexing
+
+`users/` and each chat's `media.yaml` are projections of the message files, so they can
+be rebuilt locally when the extraction rules change — no API calls, no rate limit:
+
+```sh
+lark-fs reindex --root lark-data
+```
 
 ## Setup
 

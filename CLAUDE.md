@@ -33,6 +33,14 @@ Known traps, all hit in practice:
 - Search endpoints return HTML-entity-escaped text with `<h>` hit markers; unescape it
   or the on-disk copy is not greppable.
 
+## YAML output must stay machine-readable
+
+`yaml.py` is described upstream as display-only, but this project reads its own output
+back (`lark-fs reindex`), so the rendered files must round-trip through a real parser.
+Message bodies carry control characters and U+2028 line separators; unstripped, they
+silently corrupt a literal block's indentation and the file stops parsing. `_sanitize`
+handles this — verify any renderer change with `yaml.safe_load` over a real sync.
+
 ## Invariants
 
 - One entity per file, named by its Lark ID. Cross-references are raw IDs, never paths.

@@ -107,8 +107,8 @@ def _reason(e: cli.LarkError) -> str:
 
 
 # media keys are embedded in the message body, not a separate field:
-#   text/post: `[Image: img_v3_...]`   file/media: `<file key="file_v3_..." name="..."/>`
-RE_MEDIA = compile(r'(?:\[(?:Image|Media|File|Video|Audio):\s*([a-z]+_v\d+_[\w-]+)\]|<\w+\s+key="([^"]+)"(?:\s+name="([^"]*)")?)')
+#   `[Image: img_v3_...]`  `![Image](img_v3_...)`  `<file key="file_v3_..." name="..."/>`
+RE_MEDIA = compile(r'(?:\[(?:Image|Media|File|Video|Audio):\s*([a-z]+_v\d+_[\w-]+)\]|!\[[^\]]*\]\(([a-z]+_v\d+_[\w-]+)\)|<\w+\s+key="([^"]+)"(?:\s+name="([^"]*)")?)')
 
 
 def _flush_media(store: Store, rows: list[dict]):
@@ -125,8 +125,8 @@ def _flush_media(store: Store, rows: list[dict]):
 def _index_media(msg: dict) -> list[dict]:
     """Collect media references as keys/URLs. Bytes are never downloaded."""
     rows = [
-        {"key": img or key, "name": name or "", "msg_type": msg.get("msg_type", ""), "message_id": msg.get("message_id"), "chat_id": msg.get("chat_id"), "create_time": msg.get("create_time", "")}
-        for img, key, name in RE_MEDIA.findall(msg.get("content") or "")
+        {"key": img or md or key, "name": name or "", "msg_type": msg.get("msg_type", ""), "message_id": msg.get("message_id"), "chat_id": msg.get("chat_id"), "create_time": msg.get("create_time", "")}
+        for img, md, key, name in RE_MEDIA.findall(msg.get("content") or "")
     ]
     return rows
 

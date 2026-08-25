@@ -3,6 +3,15 @@ from re import IGNORECASE, VERBOSE, compile
 type JSON = dict[str, JSON] | list[JSON] | tuple[JSON, ...] | str | int | float | bool | None
 
 
+# YAML forbids most C0 controls, and treats U+2028/2029 as line breaks -- either one
+# inside a literal block silently corrupts the document's indentation structure.
+RE_UNSAFE = compile(r"[\x00-\x08\x0b-\x1f\x7f\u2028\u2029]")
+
+
+def _sanitize(text: str) -> str:
+    return RE_UNSAFE.sub(lambda m: "\n" if m.group() in "\u2028\u2029" else "", text)
+
+
 def readable_yaml_dumps(data: JSON):
     """
     Minimal YAML serializer optimized for readability.
@@ -122,6 +131,7 @@ def _append_literal_block(value: str, lines: list[str], indent: int):
     - |+ (keep): If has multiple trailing newlines, or only newlines (no content)
     """
     block_prefix = "  " * indent
+    value = _sanitize(value)
 
     # Determine chomping indicator
     stripped_content = value.rstrip("\n")
@@ -155,6 +165,7 @@ def _serialize_scalar(value: str | float | bool | None):
     elif isinstance(value, bool):
         return "true" if value else "false"
     elif isinstance(value, str):
+        value = _sanitize(value)
         if not RE_NEEDS_ESCAPE.search(value):
             return value
         if "\\" not in value and value.count('"') < value.count("'"):
