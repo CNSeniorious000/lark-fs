@@ -84,6 +84,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
     while start < end:
         Aborted.check()
         stop = min(start + timedelta(hours=slice_hours), end)
+        p.set("messages", state="running", note=f"{start:%m-%d %H:%M}")
         argv = ["im", "+messages-search", "--query", "", "--start", _iso(start), "--end", _iso(stop), "--page-all", "--no-reactions"]
         try:
             async for msg in cli.paginate(*argv, key="messages"):
@@ -112,7 +113,6 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
         start = stop
         store.cursors["messages"] = start.isoformat()
         store.save_cursors()
-        p.set("messages", note=f"through {start:%m-%d %H:%M}")
 
     p.set("messages", state="done", note=f"{len(seen_chats)} chats")
     return seen_chats
@@ -273,29 +273,37 @@ def _clean(value):
     return value
 
 
-async def sync_minutes(store: Store, p: Progress, *, since: str = "2020-01-01"):
-    """Minutes (妙记): metadata, AI summary, chapters, todos, and full transcript."""
-    p.set("minutes", state="running")
-    tokens: list[dict] = []
-    try:
-        async for item in cli.paginate("minutes", "+search", "--start", since, key="items"):
-            tokens.append(item)
-    except cli.LarkError as e:
-        p.set("minutes", state="error", note=str(e.payload)[:60])
-        return
+async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
+    """Minutes (妙记): metadata, AI summary, chapters, todos, and full transcript.
 
-    p.set("minutes", total=len(tokens))
-    for item in tokens:
-        token = item.get("token")
-        if not token:
-            continue
+    `+search` caps at 50 results per query no matter the filters, so a single call over
+    the whole history silently reports 50. Walking month by month lifts the ceiling.
+    """
+    p.set("minutes", state="running")
+    found: dict[str, dict] = {}
+    month = datetime.fromisoformat(since).replace(tzinfo=UTC)
+    now = datetime.now(UTC)
+    while month < now:
+        nxt = (month + timedelta(days=32)).replace(day=1)
+        try:
+            async for item in cli.paginate("minutes", "+search", "--start", month.strftime("%Y-%m-%d"), "--end", nxt.strftime("%Y-%m-%d"), key="items"):
+                if token := item.get("token"):
+                    found[token] = item
+        except cli.LarkError as e:
+            p.set("minutes", state="error", note=_reason(e))
+            return
+        month = nxt
+
+    p.set("minutes", total=len(found))
+    for token, item in found.items():
         store.write_yaml(f"minutes/{token}/meta.yaml", _clean(item))
         p.bump("minutes")
 
-    todo = [t["token"] for t in tokens if t.get("token") and not store.exists(f"minutes/{t['token']}/transcript.txt")]
+    todo = [t for t in found if not store.exists(f"minutes/{t}/transcript.txt")]
     p.set("minutes", note=f"{len(todo)} transcripts to fetch")
 
     async def detail(token: str):
+        Aborted.check()
         try:
             # +detail writes transcript.txt into <cwd>/minutes/<token>/ itself -- run it in the store so it lands in place
             data = await cli.run("minutes", "+detail", "--minute-tokens", token, "--transcript", "--summary", "--todo", "--chapter", "--keyword", cwd=str(store.root))
@@ -303,11 +311,11 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2020-01-01"):
             return
         for m in (data or {}).get("minutes") or []:
             arts = m.get("artifacts") or {}
-            store.write_yaml(f"minutes/{token}/detail.yaml", {k: v for k, v in m.items() if k != "artifacts"})
+            store.write_yaml(f"minutes/{token}/detail.yaml", _clean({k: v for k, v in m.items() if k != "artifacts"}))
             if chapters := arts.get("chapters"):
-                store.write_yaml(f"minutes/{token}/chapters.yaml", chapters)
+                store.write_yaml(f"minutes/{token}/chapters.yaml", _clean(chapters))
             if todos := arts.get("todos"):
-                store.write_yaml(f"minutes/{token}/todos.yaml", todos)
+                store.write_yaml(f"minutes/{token}/todos.yaml", _clean(todos))
             if summary := arts.get("summary"):
                 store.write(f"minutes/{token}/summary.md", summary if isinstance(summary, str) else str(summary))
 
@@ -315,31 +323,37 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2020-01-01"):
     p.set("minutes", state="done")
 
 
-async def sync_meetings(store: Store, p: Progress, *, since_days: int = 365):
-    """VC meeting records; links each meeting to its minute_token and note_id."""
+async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01"):
+    """VC meeting records; links each meeting to its minute_token and note_id.
+
+    Like minutes, `+search` has a per-query ceiling (150 here), so walk month by month.
+    """
     p.set("meetings", state="running")
-    start = (datetime.now(UTC) - timedelta(days=since_days)).strftime("%Y-%m-%d")
     ids: list[str] = []
-    try:
-        async for item in cli.paginate("vc", "+search", "--start", start, key="items"):
-            mid = item.get("id")
-            if not mid:
-                continue
-            ids.append(mid)
-            store.write_yaml(f"meetings/{mid}/meta.yaml", _clean(item))
-            p.bump("meetings")
-    except cli.LarkError as e:
-        p.set("meetings", state="error", note=str(e.payload)[:60])
-        return
+    month = datetime.fromisoformat(since).replace(tzinfo=UTC)
+    now = datetime.now(UTC)
+    while month < now:
+        nxt = (month + timedelta(days=32)).replace(day=1)
+        try:
+            async for item in cli.paginate("vc", "+search", "--start", month.strftime("%Y-%m-%d"), "--end", nxt.strftime("%Y-%m-%d"), key="items"):
+                if mid := item.get("id"):
+                    ids.append(mid)
+                    store.write_yaml(f"meetings/{mid}/meta.yaml", _clean(item))
+                    p.bump("meetings")
+        except cli.LarkError as e:
+            p.set("meetings", state="error", note=_reason(e))
+            return
+        month = nxt
 
     todo = [i for i in ids if not store.exists(f"meetings/{i}/detail.yaml")]
     for batch in [todo[i : i + 20] for i in range(0, len(todo), 20)]:
+        Aborted.check()
         try:
             data = await cli.run("vc", "+detail", "--meeting-ids", ",".join(batch))
         except cli.LarkError:
             continue
         for m in (data or {}).get("meetings") or []:
-            store.write_yaml(f"meetings/{m['meeting_id']}/detail.yaml", m)
+            store.write_yaml(f"meetings/{m['meeting_id']}/detail.yaml", _clean(m))
     p.set("meetings", state="done")
 
 

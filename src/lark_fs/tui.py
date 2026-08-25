@@ -112,8 +112,11 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
         _, result = await gather(app.run_async(), worker, return_exceptions=True)
     finally:
         ticker.cancel()
-        with suppress(BaseException):
-            await ticker
+        # let both tasks finish unwinding before the loop closes, or a cancelled
+        # subprocess transport gets reaped afterwards and prints "Loop ... is closed"
+        for task in (ticker, worker):
+            with suppress(BaseException):
+                await task
     if interrupted or isinstance(result, BaseException):
         raise SyncAbortedError
     return result
