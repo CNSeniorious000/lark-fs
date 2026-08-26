@@ -1,10 +1,13 @@
 """Regressions for failures that were silent -- each one shipped and produced plausible output."""
 
 from asyncio import Semaphore, create_task, gather, run, sleep
+from datetime import datetime
+from itertools import pairwise
 from re import findall
 
 from lark_fs import cli
 from lark_fs.store import Store
+from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, _windows
 from lark_fs.yaml import readable_yaml_dumps
 
 
@@ -73,3 +76,15 @@ def test_store_reads_back_what_it_wrote(tmp_path):
 def test_a_windowed_sweep_is_labelled_by_its_window():
     """Feed rows for month walks all carry different tokens; the window is what tells them apart."""
     assert cli._label(("minutes", "+search", "--start", "2026-08-01T00:00:00Z", "--page-size", "30")) == ("minutes", "search 2026-08-01")  # noqa: SLF001
+
+
+def test_windows_tile_the_range_without_gaps_or_overlap():
+    """A busy chat is walked as parallel windows; a seam that drifts loses or doubles history."""
+    windows = _windows("2026-04-06 00:00", SLICE_HOURS)
+    assert windows[0][0] == "2026-04-06 00:00"
+    assert all(end == nxt for (_, end), (nxt, _) in pairwise(windows))
+
+
+def test_windows_reach_past_now():
+    """Stopping at the last whole window would leave today's messages unreachable."""
+    assert _windows("2026-04-06 00:00", SLICE_HOURS)[-1][1] > datetime.now(TENANT_TZ).strftime(STAMP)

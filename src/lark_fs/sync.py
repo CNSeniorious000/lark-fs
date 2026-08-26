@@ -8,7 +8,7 @@ they re-list metadata (cheap) but skip fetching bodies for entities already on d
 
 from asyncio import create_task, gather
 from collections.abc import MutableMapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from re import compile
 from typing import Any
@@ -43,6 +43,30 @@ def _earliest(store: Store, collection: str, since: str) -> datetime:
 
 def _months_between(start: datetime, end: datetime) -> int:
     return (end.year - start.year) * 12 + end.month - start.month + 1
+
+
+# A chat this dense is walked in parallel windows instead of one page sequence. The width
+# is a load-balancing knob, not a correctness one: every window pages to its own end, so
+# too wide leaves one slot working alone and too narrow spends requests on empty air.
+SLICE_AFTER = 2000
+SLICE_HOURS = 12
+STAMP = "%Y-%m-%d %H:%M"  # what the API both returns in create_time and accepts in --start/--end
+TENANT_TZ = timezone(timedelta(hours=8))  # the same offset as TZ, as a clock rather than a suffix
+
+
+def _windows(start: str, hours: int) -> list[tuple[str, str]]:
+    """Split [start, now] into fixed-width windows that can be paged independently.
+
+    `create_time` carries no offset, so "now" has to be read on the tenant's wall clock --
+    against a UTC one the last windows would land eight hours short and drop that history.
+    """
+    t = datetime.strptime(start[:16], STAMP).replace(tzinfo=TENANT_TZ)
+    now, out = datetime.now(TENANT_TZ), []
+    while t < now:
+        nxt = t + timedelta(hours=hours)
+        out.append((t.strftime(STAMP), nxt.strftime(STAMP)))
+        t = nxt
+    return out
 
 
 def _iso(dt: datetime) -> str:
@@ -92,28 +116,60 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
     users: set[str] = set()
     total = 0
 
-    async def one(chat_id: str):
+    async def drain(chat_id: str, start: str, end: str = "", limit: int = 0) -> tuple[str, bool]:
+        """Walk one time window of a chat. Returns the newest create_time seen, and whether `limit` cut it short."""
         nonlocal total
-        since = cursors.get(chat_id)
-        argv = ["im", "+chat-messages-list", "--chat-id", chat_id, "--order", "asc", "--no-reactions", *(["--start", since] if since else [])]
-        newest = since
+        argv = ["im", "+chat-messages-list", "--chat-id", chat_id, "--order", "asc", "--no-reactions", *(["--start", start] if start else []), *(["--end", end] if end else [])]
+        newest, seen = "", 0
+        async for msg in cli.paginate(*argv, key="messages", prefetch=True):
+            if not (mid := msg.get("message_id")):
+                continue
+            created = msg.get("create_time", "")
+            thread = msg.get("thread_id")
+            rel = f"chats/{chat_id}/threads/{thread}/{mid}.yaml" if thread else f"chats/{chat_id}/messages/{created[:7] or 'unknown'}/{mid}.yaml"
+            store.write_yaml(rel, _clean(msg))
+            media.extend(_index_media(msg))
+            _record_sender(store, msg, users)
+            total += 1
+            newest = max(newest, created)
+            if total % 20 == 0:
+                sender = (msg.get("sender") or {}).get("name") or ""
+                p.set("messages", last=f"{sender}: {cli.oneline(msg.get('content'), 40)}", note=f"{total} messages")
+            if limit and (seen := seen + 1) >= limit:
+                return newest, True
+        return newest, False
+
+    async def one(chat_id: str):
+        since = cursors.get(chat_id) or ""
         try:
-            async for msg in cli.paginate(*argv, key="messages", prefetch=True):
-                if not (mid := msg.get("message_id")):
-                    continue
-                created = msg.get("create_time", "")
-                thread = msg.get("thread_id")
-                rel = f"chats/{chat_id}/threads/{thread}/{mid}.yaml" if thread else f"chats/{chat_id}/messages/{created[:7] or 'unknown'}/{mid}.yaml"
-                store.write_yaml(rel, _clean(msg))
-                media.extend(_index_media(msg))
-                _record_sender(store, msg, users)
-                total += 1
-                newest = max(newest or "", created)
-                if total % 20 == 0:
-                    sender = (msg.get("sender") or {}).get("name") or ""
-                    p.set("messages", last=f"{sender}: {cli.oneline(msg.get('content'), 40)}", note=f"{total} messages")
+            newest, dense = await drain(chat_id, since, limit=SLICE_AFTER)
         except cli.LarkError:
-            pass  # one unreadable chat must not sink the sweep; its cursor stays put
+            p.bump("messages")  # one unreadable chat must not sink the sweep; its cursor stays put
+            return
+        if dense:
+            # An alert bot's chat runs to six figures. Paged in one sequence it walks
+            # thousands of pages on a single slot and holds the whole sweep open long
+            # after every other chat is done, so the rest of it is split into windows
+            # that page independently.
+            windows = _windows(newest, SLICE_HOURS)
+            gap, high, filled = "", newest, 0
+
+            async def window(bounds: tuple[str, str]):
+                nonlocal gap, high, filled
+                try:
+                    seen, _ = await drain(chat_id, *bounds)
+                    high = max(high, seen)
+                except cli.LarkError:
+                    gap = min(gap or bounds[0], bounds[0])
+                filled += 1
+                p.set("messages", note=f"{total} messages, {filled}/{len(windows)} windows of one busy chat")
+
+            await cli.spread(window, windows)
+            # The cursor tracks the newest message actually read, never a window boundary:
+            # the last window ends in the future, and storing that would skip every message
+            # sent between now and then. It also may not pass a window that failed, or that
+            # slice of history is gone for good.
+            newest = min(gap, high) if gap else high
         if newest and newest != since:
             # store one second past the last message, or every run re-reads it
             cursors[chat_id] = newest
