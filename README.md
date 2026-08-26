@@ -9,7 +9,7 @@ Needs `lark-cli` on PATH; [uv](https://docs.astral.sh/uv/) brings its own Python
 there is nothing else to set up. To run it once:
 
 ```sh
-uvx --from git+https://github.com/CNSeniorious000/lark-fs lark-fs sync
+uvx git+https://github.com/CNSeniorious000/lark-fs sync
 ```
 
 To keep it — this puts `lark-fs` on your PATH, and `uv tool upgrade lark-fs` pulls later
