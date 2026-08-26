@@ -201,7 +201,7 @@ DOC_QUERIES = ["", "a", "e", "的", "会议", "设计", "项目", "需求", "方
 async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None):
     """Cloud docs discovered via search and via wiki nodes, exported to markdown, plus comments."""
     p.set("docs", state="running")
-    seen: set[str] = set()
+    seen: dict[str, dict] = {}
     for q in queries or DOC_QUERIES:
         try:
             async for r in cli.paginate("drive", "+search", "--query", q, key="results"):
@@ -209,7 +209,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 token = meta.get("token")
                 if not token or token in seen:
                     continue
-                seen.add(token)
+                seen[token] = meta
                 title = _clean(r.get("title_highlighted"))
                 store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "entity_type": r.get("entity_type"), "title": title})
                 p.bump("docs", last=_oneline(title))
@@ -220,12 +220,14 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     for space in (store.root / "wiki").glob("*/nodes.yaml"):
         for node in store.read_yaml_rows(f"wiki/{space.parent.name}/nodes.yaml"):
             if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
-                seen.add(token)
+                seen[token] = {}
                 store.write_yaml(f"docs/{token}/meta.yaml", {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")})
                 p.bump("docs", last=_oneline(node.get("title")))
 
-    # bodies are the expensive part -- only fetch ones missing from disk
-    todo = [t for t in seen if not store.exists(f"docs/{t}/content.md")]
+    # bodies are the expensive part: fetch one only if we have none, or if the server's
+    # update_time moved past the copy we already wrote. A doc can be edited at any time,
+    # so there is no window to bound this -- the timestamp is the only reliable signal.
+    todo = [t for t, meta in seen.items() if _doc_is_stale(store, t, meta)]
     p.set("docs", total=len(seen), note=f"{len(todo)} bodies to fetch")
 
     async def body(token: str):
@@ -244,6 +246,15 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
 
     await gather(*(body(t) for t in todo))
     p.set("docs", state="done")
+
+
+def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
+    """True when the body is missing, or the server copy is newer than ours."""
+    body = store.root / f"docs/{token}/content.md"
+    if not body.exists():
+        return True
+    remote = meta.get("update_time")
+    return bool(remote and remote > body.stat().st_mtime)
 
 
 def _oneline(text, limit: int = 60) -> str:

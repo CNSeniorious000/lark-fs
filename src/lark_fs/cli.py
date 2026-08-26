@@ -1,8 +1,9 @@
 """Thin async wrapper around the `lark-cli` binary."""
 
-from asyncio import CancelledError, Semaphore, create_subprocess_exec, create_task, sleep, subprocess
-from collections import deque
+from asyncio import CancelledError, Semaphore, create_subprocess_exec, create_task, shield, sleep, subprocess
+from collections import defaultdict, deque
 from contextlib import suppress
+from contextvars import ContextVar
 from itertools import count, pairwise
 from json import JSONDecoder
 from re import compile
@@ -15,29 +16,34 @@ FEED_LIMIT = 10  # how many recent requests the TUI shows
 
 
 class Activity:
-    """A rolling log of requests for the TUI: what finished, and what is in flight.
+    """A rolling log of requests, grouped by the collection that issued them.
 
-    Finished entries drift up and out; running ones stay pinned at the bottom, so a row
-    does not jump position the moment it completes.
+    Within a group, finished entries drift up and out while running ones stay pinned at
+    the bottom, so a row never jumps position the moment it completes.
     """
 
     def __init__(self):
-        self.done: deque[tuple[str, str, str]] = deque(maxlen=FEED_LIMIT)  # (domain, subject, state)
-        self.running: dict[int, tuple[str, str]] = {}
+        self.done: dict[str, deque[tuple[str, str, str]]] = defaultdict(lambda: deque(maxlen=FEED_LIMIT))
+        self.running: dict[int, tuple[str, str, str]] = {}
 
-    def start(self, rid: int, domain: str, subject: str):
-        self.running[rid] = (domain, subject)
+    def start(self, rid: int, group: str, domain: str, subject: str):
+        self.running[rid] = (group, domain, subject)
 
     def finish(self, rid: int, state: str):
         if entry := self.running.pop(rid, None):
-            self.done.append((*entry, state))
+            group, domain, subject = entry
+            self.done[group].append((domain, subject, state))
 
-    def rows(self, limit: int = FEED_LIMIT) -> list[tuple[str, str, str]]:
-        live = [(d, s, "running") for d, s in self.running.values()]
-        return (list(self.done) + live)[-limit:]
+    def rows(self, group: str, limit: int) -> list[tuple[str, str, str]]:
+        live = [(d, s, "running") for g, d, s in self.running.values() if g == group]
+        return (list(self.done.get(group, ())) + live)[-limit:]
+
+    def busy(self, group: str) -> int:
+        return sum(1 for g, _, _ in self.running.values() if g == group)
 
 
 activity = Activity()
+current_group: ContextVar[str] = ContextVar("current_group", default="")  # which collection issued this request
 _next_id = count()
 
 
@@ -133,16 +139,19 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
     for attempt in range(retries):
         async with _sem:
             rid = next(_next_id)
-            activity.start(rid, *_label(argv))
+            activity.start(rid, current_group.get(), *_label(argv))
             failed = True
             try:
                 proc = await create_subprocess_exec(*args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
                 out, stderr = await proc.communicate()
                 failed = False
             except CancelledError:
-                # ctrl-c: kill the child instead of letting its pending read surface as an unhandled error
+                # ctrl-c: kill the child and *wait for it*. Without the wait, asyncio reaps the
+                # subprocess transport after the loop has closed and complains "Loop ... is closed".
                 with suppress(ProcessLookupError, UnboundLocalError):
                     proc.kill()
+                    with suppress(CancelledError):
+                        await shield(proc.wait())
                 raise
             finally:
                 activity.finish(rid, "error" if failed else "done")
