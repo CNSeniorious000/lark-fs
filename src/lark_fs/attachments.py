@@ -21,6 +21,8 @@ _TEXT = """bash c cfg cjs conf cpp css csv diff env go h hpp htm html ini java j
 makefile markdown md mjs ndjson patch php pl properties py r rb rs rst scss sh sql srt svg swift tex text toml ts tsv
 tsx txt vtt xml yaml yml zsh"""
 
+OVERSIZE = ".oversize"  # marks a key that was fetched, measured, and discarded
+
 KINDS: dict[str, set[str]] = {
     "text": set(_TEXT.split()),
     "image": {"avif", "bmp", "gif", "heic", "ico", "jpeg", "jpg", "png", "tiff", "webp"},
@@ -87,20 +89,32 @@ def _dir(store: Store, row: dict) -> Path:
 def _settle(dest: Path, data: dict, cap: int) -> bool:
     """Discard an attachment that turned out to be too big; True when it was kept."""
     saved = Path(data.get("saved_path") or "")
-    if data.get("size_bytes", 0) <= cap or not saved.is_file():
+    if (size := data.get("size_bytes", 0)) <= cap or not saved.is_file():
         return True
     saved.unlink()
-    (dest / ".oversize").write_text("")  # a marker, or every run re-downloads it to find out
+    # the marker carries the size that disqualified it, so raising max_mb brings it back;
+    # a bare marker would make the first cap that rejected a file the permanent one
+    (dest / OVERSIZE).write_text(str(size))
     return False
 
 
-def _pending(store: Store, policy: Policy, rows: list[dict]) -> list[dict]:
-    """Rows still worth a request: admitted by the policy, and not already settled on disk.
+def _settled(d: Path, cap: int) -> bool:
+    """Is this key done with, for the current size cap?
 
-    A directory with anything in it counts as settled -- including just the `.oversize`
-    marker, which pathlib's `glob("*")` does match even though a shell's would not.
+    Anything in the directory counts -- including just the marker, which pathlib's
+    `glob("*")` does match even though a shell's would not. A marker written before this
+    change has no size in it, and re-reading such a file once is what fills it in.
     """
-    return [r for r in rows if r.get("key") and policy.wants(r["key"], r.get("name") or "") and not any(_dir(store, r).glob("*"))]
+    if not any(d.glob("*")):
+        return False
+    if (mark := d / OVERSIZE).is_file():
+        return int(mark.read_text() or 0) > cap
+    return True
+
+
+def _pending(store: Store, policy: Policy, rows: list[dict]) -> list[dict]:
+    """Rows still worth a request: admitted by the policy, and not already settled on disk."""
+    return [r for r in rows if r.get("key") and policy.wants(r["key"], r.get("name") or "") and not _settled(_dir(store, r), policy.max_bytes)]
 
 
 async def sync_attachments(store: Store, p: Progress):

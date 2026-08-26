@@ -6,7 +6,7 @@ from itertools import pairwise
 from re import findall
 
 from lark_fs import cli
-from lark_fs.attachments import Policy, _pending
+from lark_fs.attachments import Policy, _pending, _settle
 from lark_fs.store import Store
 from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, _note_tenant, _wiki_aliases, _windows
 from lark_fs.yaml import readable_yaml_dumps
@@ -108,8 +108,12 @@ def test_an_oversize_marker_stops_the_retry(tmp_path):
     """The marker is the only record that a file was too big -- the file itself is deleted."""
     store = Store(tmp_path)
     row = {"key": "file_1", "name": "huge.md", "chat_id": "oc_1", "message_id": "om_1"}
-    store.write(f"chats/oc_1/files/{row['key']}/.oversize", "")
+    store.write(f"chats/oc_1/files/{row['key']}/.oversize", str(30 * 1024 * 1024))
     assert _pending(store, Policy({"text"}, 1), [row]) == []
+    # a marker from before sizes were recorded says nothing about the current cap, so it
+    # is worth one more fetch -- which is what fills the size in
+    store.write(f"chats/oc_1/files/{row['key']}/.oversize", "")
+    assert _pending(store, Policy({"text"}, 1), [row]) == [row]
 
 
 def test_an_extension_escape_hatch_beats_the_kind_lists(tmp_path):
@@ -158,3 +162,24 @@ def test_a_wiki_node_token_resolves_to_the_document_it_points_at(tmp_path):
         ],
     )
     assert _wiki_aliases(store) == {"Nod1": "Obj1"}
+
+
+def test_raising_the_size_cap_brings_back_what_it_rejected(tmp_path):
+    """The marker has to carry the size that disqualified the file, or the first cap that
+    ever rejected it becomes permanent and no config change can undo it."""
+    store = Store(tmp_path)
+    row = {"key": "file_1", "name": "big.jsonl", "chat_id": "oc_1", "message_id": "om_1"}
+    store.write(f"chats/oc_1/files/{row['key']}/.oversize", str(30 * 1024 * 1024))
+    assert _pending(store, Policy({"text"}, 10 * 1024 * 1024), [row]) == [], "still too big at 10MB"
+    assert _pending(store, Policy({"text"}, 50 * 1024 * 1024), [row]) == [row], "fits at 50MB, fetch it again"
+
+
+def test_the_marker_records_the_size_that_disqualified_it(tmp_path):
+    """Writing a bare marker is what made the first rejecting cap permanent."""
+    dest = tmp_path / "file_1"
+    dest.mkdir()
+    big = dest / "big.jsonl"
+    big.write_text("x")
+    assert _settle(dest, {"saved_path": str(big), "size_bytes": 30_000_000}, 10_000_000) is False
+    assert not big.exists(), "an oversize file is not kept"
+    assert (dest / ".oversize").read_text() == "30000000"
