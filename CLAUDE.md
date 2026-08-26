@@ -92,5 +92,9 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
   children. Check that every `while` around a request actually advances its cursor.
 - Interruption is handled in `cli.run`, so every request is a cancellation point. Do not
   add per-loop stop checks in syncers — that approach already missed half of them.
+- Two different ceilings exist and only one is survivable. 99991400 is per-second/minute
+  throttling — back off and continue. 99991403 is the tenant's *monthly* API allowance,
+  shared across every custom app, resetting on the 1st; retrying cannot clear it, so the
+  run stops and says so. Never treat them the same.
 - Rate limits are certain, not hypothetical. Anything that walks a long range must
   commit its cursor incrementally so an interrupted run resumes instead of restarting.

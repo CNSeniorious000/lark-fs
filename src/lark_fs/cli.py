@@ -213,6 +213,16 @@ class LarkError(Exception):
         # 99991400 is Lark's "request trigger frequency limit"; the subtype spelling varies by endpoint
         return self._code == 99991400 or "rate_limit" in str(self.payload)
 
+    @property
+    def is_quota_exhausted(self):
+        """99991403: the tenant's *monthly* API allowance is gone.
+
+        A different ceiling from 99991400 and a far worse one -- it counts every custom
+        app in the tenant together, resets on the 1st, and no amount of backoff clears it.
+        Retrying is not just useless, it burns the next month's budget once it rolls over.
+        """
+        return self._code == 99991403
+
 
 def _parse(text: str) -> Any | None:
     """Extract lark-cli's JSON body.
@@ -266,6 +276,9 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None, subject: str
         if payload.get("ok"):
             return payload.get("data")
         exc = LarkError(list(argv), payload)
+        if exc.is_quota_exhausted:
+            Aborted.flag = True  # nothing will succeed until the month rolls over
+            raise exc
         if not exc.is_rate_limited or attempt == retries - 1:
             raise exc
         await sleep(delay)
