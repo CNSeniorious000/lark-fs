@@ -140,6 +140,10 @@ not one that only shows in a transient state:
   refuses to commit it. Every tool that reads ignore files follows it in, so anything that
   walks the tree needs its own exclusion -- ruff started reformatting Python inside
   mirrored documents, and pytest collected 300k files looking for tests.
+- Wiki levels run at `WIKI_WIDTH`, not the global concurrency. `+node-list --page-all`
+  pages internally, so N of them at once is up to 10N requests in a burst. Measured over
+  a full tree: 8-wide lost 315 nodes to 35 rate limits, 3-wide walked all 2366 with none.
+  A `partial` note on the wiki row means this is happening again.
 - A failed request and an empty answer must stay distinguishable. `+node-list` returning
   `[]` meant both "this branch has no children" and "this was rate-limited", and writing
   that result replaced a 2205-node list with `[]` -- taking with it the only mapping from

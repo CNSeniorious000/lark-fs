@@ -74,6 +74,11 @@ def _learn_tenant(store: Store):
 # too wide leaves one slot working alone and too narrow spends requests on empty air.
 SLICE_AFTER = 2000
 SLICE_HOURS = 12
+# Wiki levels are the exception to the global concurrency: `+node-list --page-all` fans out
+# internally, so eight at once is ~80 requests in a burst and Lark throttles it. Measured
+# over a full tree: at 8 it lost 315 nodes to 35 rate limits; at 3 it walked all 2366 with
+# none, for 108s instead of 43s. A tree walked once a day can afford the difference.
+WIKI_WIDTH = 3
 STAMP = "%Y-%m-%d %H:%M"  # what the API both returns in create_time and accepts in --start/--end
 TENANT_TZ = timezone(timedelta(hours=8))  # the same offset as TZ, as a clock rather than a suffix
 
@@ -641,7 +646,7 @@ async def sync_wiki(store: Store, p: Progress):
         whole = True
         frontier: list[str | None] = [None]
         while frontier:
-            batch, frontier = frontier[: cli.CONCURRENCY], frontier[cli.CONCURRENCY :]
+            batch, frontier = frontier[:WIKI_WIDTH], frontier[WIKI_WIDTH:]
             for nodes in await gather(*(level(sid, parent) for parent in batch)):
                 if nodes is None:
                     whole = False
