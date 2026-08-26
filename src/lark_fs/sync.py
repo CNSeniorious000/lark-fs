@@ -8,7 +8,6 @@ they re-list metadata (cheap) but skip fetching bodies for entities already on d
 
 from asyncio import create_task, gather, sleep
 from datetime import UTC, datetime, timedelta
-from html import unescape
 from pathlib import Path
 from re import compile
 
@@ -39,6 +38,7 @@ class Progress:
         return self.rows.get(name) or {"name": name, "state": "pending", "done": 0, "total": None, "note": "", "last": ""}
 
     def set(self, name: str, **fields):
+        cli.current_group.set(name)  # one source of truth: the row you report under owns your requests
         self.rows[name] = {**self._row(name), **fields}
 
     def bump(self, name: str, n: int = 1, last: str = ""):
@@ -61,7 +61,6 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
     slices and commit the cursor after each one: an interrupted run resumes where it
     stopped instead of discarding everything it already wrote.
     """
-    cli.current_group.set("messages")
     p.set("messages", state="running")
     cursor = store.cursors.get("messages")
     start = datetime.fromisoformat(cursor) if cursor else datetime.now(UTC) - timedelta(days=window_days)
@@ -89,7 +88,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
                 media += _index_media(msg)
                 _record_sender(store, msg, known_users)
                 sender = (msg.get("sender") or {}).get("name") or ""
-                p.bump("messages", last=f"{msg.get('chat_name') or chat_id}  {sender}: {_oneline(msg.get('content'))}")
+                p.bump("messages", last=f"{msg.get('chat_name') or chat_id}  {sender}: {cli.oneline(msg.get('content'))}")
                 await sleep(0)  # keep the UI responsive; repaint rate is the TUI's concern
         except cli.LarkError as e:
             # keep whatever this run already committed; the next run picks up from `start`
@@ -132,7 +131,14 @@ def _flush_media(store: Store, rows: list[dict]):
 def _index_media(msg: dict) -> list[dict]:
     """Collect media references as keys/URLs. Bytes are never downloaded."""
     rows = [
-        {"key": img or md or key, "name": name or "", "msg_type": msg.get("msg_type", ""), "message_id": msg.get("message_id"), "chat_id": msg.get("chat_id"), "create_time": msg.get("create_time", "")}
+        {
+            "key": img or md or key,
+            "name": name or "",
+            "msg_type": msg.get("msg_type", ""),
+            "message_id": msg.get("message_id"),
+            "chat_id": msg.get("chat_id"),
+            "create_time": msg.get("create_time", ""),
+        }
         for img, md, key, name in RE_MEDIA.findall(msg.get("content") or "")
     ]
     return rows
@@ -144,7 +150,6 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
     `+chat-list` covers chats that have said nothing in the synced window, so it finds
     more than the message sweep does; ids seen in messages are unioned in on top.
     """
-    cli.current_group.set("chats")
     p.set("chats", state="running")
     listed: dict[str, dict] = {}
     try:
@@ -202,7 +207,6 @@ DOC_QUERIES = ["", "a", "e", "的", "会议", "设计", "项目", "需求", "方
 
 async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None):
     """Cloud docs discovered via search and via wiki nodes, exported to markdown, plus comments."""
-    cli.current_group.set("docs")
     p.set("docs", state="running")
     seen: dict[str, dict] = {}
     for q in queries or DOC_QUERIES:
@@ -212,10 +216,10 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 token = meta.get("token")
                 if not token or token in seen:
                     continue
-                seen[token] = meta
                 title = _clean(r.get("title_highlighted"))
+                seen[token] = {**meta, "title": title}
                 store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "entity_type": r.get("entity_type"), "title": title})
-                p.bump("docs", last=_oneline(title))
+                p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:
             continue
 
@@ -223,9 +227,12 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     for space in (store.root / "wiki").glob("*/nodes.yaml"):
         for node in store.read_yaml_rows(f"wiki/{space.parent.name}/nodes.yaml"):
             if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
-                seen[token] = {}
-                store.write_yaml(f"docs/{token}/meta.yaml", {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")})
-                p.bump("docs", last=_oneline(node.get("title")))
+                seen[token] = {"title": node.get("title", "")}
+                store.write_yaml(
+                    f"docs/{token}/meta.yaml",
+                    {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")},
+                )
+                p.bump("docs", last=cli.oneline(node.get("title")))
 
     # bodies are the expensive part: fetch one only if we have none, or if the server's
     # update_time moved past the copy we already wrote. A doc can be edited at any time,
@@ -235,16 +242,13 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
 
     async def body(token: str):
         try:
-            data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown")
+            data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {cli.oneline(seen[token].get('title') or token, 48)}")
         except cli.LarkError:
-            # sheets, bitables and the like have no markdown body; remember that, or every
-            # run retries the same few hundred tokens forever
-            store.write(f"docs/{token}/.nobody", "")
-            return
-        if content := ((data or {}).get("document") or {}).get("content"):
-            store.write(f"docs/{token}/content.md", content)
-        else:
-            store.write(f"docs/{token}/.nobody", "")
+            return  # transient: leave it due, the next run retries it
+        # sheets, bitables and the like answer fine but carry no markdown body; record that,
+        # or every run retries the same few hundred tokens forever
+        content = ((data or {}).get("document") or {}).get("content")
+        store.write(f"docs/{token}/content.md", content) if content else store.write(f"docs/{token}/.nobody", "")
         try:
             comments = await cli.run("drive", "+list-comments", "--token", token, "--type", "docx", "--solved-status", "all")
             if comments:
@@ -278,7 +282,6 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
     have from the last `window_days` and rewrite only what actually changed -- one request
     per 50 messages, which is far cheaper than re-fetching the window.
     """
-    cli.current_group.set("messages")
     cutoff = (datetime.now(UTC) - timedelta(days=window_days)).strftime("%Y-%m")
     recent = sorted((f for f in (store.root / "chats").glob("*/messages/*/*.yaml") if f.parent.name >= cutoff), key=lambda f: f.parent.name, reverse=True)
     if not recent:
@@ -317,29 +320,17 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
     p.set("recheck", state="done", note=f"{changed} updated, {len(recalled)} recalled")
 
 
-def _oneline(text, limit: int = 60) -> str:
-    """Collapse a message body to a single short line for the progress display."""
-    flat = " ".join(str(text or "").split())
-    return flat[: limit - 1] + "…" if len(flat) > limit else flat
-
-
 def _rows(payload: dict) -> list[dict]:
     """+record-list returns a column matrix; zip it back into named rows keyed by record_id."""
     fields, data, ids = payload.get("fields") or [], payload.get("data") or [], payload.get("record_id_list") or []
     return [{"record_id": rid, **dict(zip(fields, row, strict=False))} for rid, row in zip(ids, data, strict=False)]
 
 
-# `html.unescape` also decodes entities written without a semicolon, so a URL carrying
-# `&timestamp=` or `&notify=` silently loses those characters to the `times` and `not`
-# entities. Lark always emits the semicolon form, so only that is safe to decode.
-RE_ENTITY = compile(r"&(#\d+|#[xX][0-9a-fA-F]+|\w+);")
-
-
 def _clean(value):
     """Lark's search endpoints return HTML-entity-escaped text with <h> hit markers.
     Left as-is those become `&lt;b&gt;` on disk, which breaks plain-text grep."""
     if isinstance(value, str):
-        return RE_ENTITY.sub(lambda m: unescape(m[0]), value.replace("<h>", "").replace("</h>", ""))
+        return cli.unescape_entities(value.replace("<h>", "").replace("</h>", ""))
     if isinstance(value, dict):
         return {k: _clean(v) for k, v in value.items()}
     if isinstance(value, list):
@@ -353,7 +344,6 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
     `+search` caps at 50 results per query no matter the filters, so a single call over
     the whole history silently reports 50. Walking month by month lifts the ceiling.
     """
-    cli.current_group.set("minutes")
     p.set("minutes", state="running")
     found: dict[str, dict] = {}
     month = datetime.fromisoformat(since).replace(tzinfo=UTC)
@@ -373,7 +363,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
     p.set("minutes", total=len(found))
     for token, item in found.items():
         store.write_yaml(f"minutes/{token}/meta.yaml", _clean(item))
-        p.bump("minutes", last=_oneline(_clean(item.get("display_info"))))
+        p.bump("minutes", last=cli.oneline(_clean(item.get("display_info"))))
 
     todo = [t for t in found if not store.exists(f"minutes/{t}/transcript.txt")]
     p.set("minutes", note=f"{len(todo)} transcripts to fetch")
@@ -404,7 +394,6 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
 
     Like minutes, `+search` has a per-query ceiling (150 here), so walk month by month.
     """
-    cli.current_group.set("meetings")
     p.set("meetings", state="running")
     ids: list[str] = []
     month = datetime.fromisoformat(since).replace(tzinfo=UTC)
@@ -416,7 +405,7 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
                 if mid := item.get("id"):
                     ids.append(mid)
                     store.write_yaml(f"meetings/{mid}/meta.yaml", _clean(item))
-                    p.bump("meetings", last=_oneline(_clean(item.get("display_info"))))
+                    p.bump("meetings", last=cli.oneline(_clean(item.get("display_info"))))
         except cli.LarkError as e:
             if not e.is_pagination_exhausted:
                 p.set("meetings", state="error", note=_reason(e))
@@ -437,7 +426,6 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
 
 async def sync_bases(store: Store, p: Progress):
     """Bitables reachable from drive search; one JSONL of records per table."""
-    cli.current_group.set("bases")
     p.set("bases", state="running")
     tokens: set[str] = set()
     try:
@@ -479,7 +467,6 @@ async def sync_bases(store: Store, p: Progress):
 
 
 async def sync_wiki(store: Store, p: Progress):
-    cli.current_group.set("wiki")
     p.set("wiki", state="running")
     try:
         spaces = await cli.run("wiki", "+space-list", "--page-all")
@@ -506,7 +493,7 @@ async def sync_wiki(store: Store, p: Progress):
         found: list[dict] = []
         frontier = [None]
         while frontier:
-            batch, frontier = frontier[:cli.CONCURRENCY], frontier[cli.CONCURRENCY:]
+            batch, frontier = frontier[: cli.CONCURRENCY], frontier[cli.CONCURRENCY :]
             for nodes in await gather(*(level(sid, parent) for parent in batch)):
                 found += nodes
                 frontier += [n["node_token"] for n in nodes if n.get("has_child")]

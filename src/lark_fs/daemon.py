@@ -32,7 +32,7 @@ class Schedule:
 async def watch(root: Path, p: Progress, schedule: Schedule | None = None, cycles: int = 0):
     """Poll forever (or `cycles` times), running each tier when it comes due."""
     schedule = schedule or Schedule()
-    store = Store(root)
+    store = Store(root)  # only recheck_messages needs one; sync_all owns its own and persists it
     due = dict.fromkeys(("messages", "recheck", "archive"), 0.0)
     ran = 0
 
@@ -52,7 +52,6 @@ async def watch(root: Path, p: Progress, schedule: Schedule | None = None, cycle
             await recheck_messages(store, p)
             due["recheck"] = now + schedule.recheck
 
-        store.save_cursors()
         ran += 1
         if cycles and ran >= cycles:
             return store

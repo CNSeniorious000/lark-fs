@@ -3,11 +3,12 @@
 from asyncio import Event, Future, create_task, gather, sleep
 from contextlib import suppress
 from itertools import cycle
+from re import compile
 from sys import stderr
 from xml.sax.saxutils import escape
 
 from prompt_toolkit.application import Application, get_app
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.formatted_text import HTML, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
@@ -15,21 +16,24 @@ from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
 from reactivity import derived, effect, signal
 
-from .cli import SyncAbortedError, activity
+from . import cli
+from .cli import SyncAbortedError, activity, link_for
 from .sync import ALL, Progress
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 GLYPH = {"pending": "<dim>·</dim>", "running": "", "done": "<ok>✓</ok>", "error": "<err>✗</err>"}
-STYLE = Style.from_dict({
-    "ok": "#22c55e",
-    "err": "#ef4444",
-    "dim": "#6b7280",
-    "name": "bold",
-    "num": "#eab308",
-    "live": "#3b82f6",  # in flight
-    "muted": "#6b7280",  # already settled
-    "dom": "#a1a1aa",  # feed's first column: readable, but quieter than the collection names
-})
+STYLE = Style.from_dict(
+    {
+        "ok": "#22c55e",
+        "err": "#ef4444",
+        "dim": "#6b7280",
+        "name": "bold",
+        "num": "#eab308",
+        "live": "#3b82f6",  # in flight
+        "muted": "#6b7280",  # already settled
+        "dom": "#a1a1aa",  # feed's first column: readable, but quieter than the collection names
+    }
+)
 
 
 def _line(row: dict, frame: str, width: int) -> str:
@@ -39,11 +43,13 @@ def _line(row: dict, frame: str, width: int) -> str:
     head = f"{mark} <name>{row['name']:<9}</name> <num>{count:<7}</num>"
     # show what was just written; fall back to the phase note when nothing has landed yet
     tail = row["last"] if row["state"] == "running" and row["last"] else row["note"]
-    room = max(0, width - len(row["name"]) - len(count) - 14)
+    room = max(0, width - max(len(row["name"]), 9) - max(len(count), 7) - 5)
     return head + (f" <dim>{escape(tail[:room])}</dim>" if tail else "")
 
 
-FEED_MARK = {"running": ("<live>→</live>", "live"), "done": ("<ok>✓</ok>", "muted"), "error": ("<err>✗</err>", "muted")}
+MARK = {"running": "→", "done": "✓", "error": "✗"}
+FEED_MARK = {"running": ("live", "live"), "done": ("ok", "muted"), "error": ("err", "muted")}
+RE_TOKEN = compile(r"\b(?:oc_|ou_|obc|tbl|bas)[A-Za-z0-9_]{6,}|\b[A-Za-z0-9]{20,}\b")
 MAX_ROWS = 40  # ceiling on total height, so a huge terminal is not filled edge to edge
 
 
@@ -63,17 +69,35 @@ def _budget(rows: list[str], progress, height: int) -> dict[str, int]:
     return {n: floors[n] + share + (1 if i < extra else 0) for i, n in enumerate(active)}
 
 
-def _feed(group: str, limit: int, width: int) -> list[str]:
+def _hyperlink(text: str, tone: str) -> list:
+    """Fragments for `text`, with any bare token wrapped in an OSC 8 hyperlink.
+
+    A running row often shows nothing but an id; making it clickable turns that from noise
+    into the fastest way to open what is being synced. `[ZeroWidthEscape]` is how
+    prompt-toolkit passes raw escapes through without counting them toward the width.
+    """
+    out, at = [], 0
+    for m in RE_TOKEN.finditer(text):
+        if not (url := link_for(m[0])):
+            continue
+        out.append((f"class:{tone}", text[at : m.start()]))
+        out += [("[ZeroWidthEscape]", f"\x1b]8;;{url}\x1b\\"), (f"class:{tone}", m[0]), ("[ZeroWidthEscape]", "\x1b]8;;\x1b\\")]
+        at = m.end()
+    out.append((f"class:{tone}", text[at:]))
+    return out
+
+
+def _feed(group: str, limit: int, width: int) -> list[list]:
     """One collection's recent requests, oldest first: finished drift up, in-flight pinned below."""
     entries = activity.rows(group, limit)
     if not entries:
         return []
     col = max(len(domain) for domain, _, _ in entries)
-    room = max(8, width - col - 8)
+    room = max(8, width - col - 7)  # 4 indent + mark + 2 spaces
     lines = []
     for domain, subject, state in entries:
-        mark, tone = FEED_MARK[state]
-        lines.append(f"    {mark} <dom>{domain:<{col}}</dom> <{tone}>{escape(subject[:room])}</{tone}>")
+        glyph, tone = FEED_MARK[state]
+        lines.append([("", "    "), (f"class:{glyph}", MARK[state]), ("", " "), ("class:dom", f"{domain:<{col}}"), ("", " "), *_hyperlink(subject[:room], tone)])
     return lines
 
 
@@ -101,6 +125,7 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     if not stderr.isatty():
         return await run_plain(coro_factory, names)
 
+    cli.feed_enabled = True
     rows = names or ALL
     app_started = Event()
     never = Future()
@@ -116,19 +141,25 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     @derived
     def view():
         """Tracks progress.rows and the spinner, so the effect below knows when to redraw."""
-        width = get_app().output.get_size().columns
-        budget = _budget(rows, progress, min(get_app().output.get_size().rows - 2, MAX_ROWS))
-        lines = []
+        size = get_app().output.get_size()
+        width = size.columns
+        budget = _budget(rows, progress, min(size.rows - 2, MAX_ROWS))
+        lines: list[list] = []
         for n in rows:
             if n not in progress.rows:
                 continue
-            lines.append(_line(progress.rows[n], frame.get(), width))
+            lines.append(to_formatted_text(HTML(_line(progress.rows[n], frame.get(), width))))
             lines += _feed(n, budget.get(n, 0), width) if budget.get(n) else []
         nonlocal peak
         peak = max(peak, len(lines))
         painted.set(peak)
-        lines += [""] * (peak - len(lines))  # pad, or a shrinking frame leaves stale rows on screen
-        return HTML("\n".join(lines))
+        lines += [[]] * (peak - len(lines))  # pad, or a shrinking frame leaves stale rows on screen
+        out: list = []
+        for i, line in enumerate(lines):
+            if i:
+                out.append(("", "\n"))
+            out += line
+        return out
 
     # height must cover the collection rows plus every concurrent request line
     body = Window(FormattedTextControl(view), height=lambda: painted.get(), dont_extend_height=True, always_hide_cursor=True)
@@ -210,6 +241,6 @@ def print_summary(store):
         "wiki": store.count("wiki/*"),
     }
     width = max(len(k) for k in counts)
-    print(f"\n  {store.root}", file=stderr)
+    print(f"  {store.root}", file=stderr)
     for k, v in counts.items():
         print(f"  {k:<{width}}  {v}", file=stderr)

@@ -4,6 +4,7 @@ from asyncio import CancelledError, Semaphore, create_subprocess_exec, create_ta
 from collections import defaultdict, deque
 from contextlib import suppress
 from contextvars import ContextVar
+from html import unescape
 from itertools import count, pairwise
 from json import JSONDecoder
 from re import compile
@@ -50,11 +51,12 @@ class Activity:
 
 
 activity = Activity()
+feed_enabled = False  # set by the TUI; the plain renderer never reads the feed
 current_group: ContextVar[str] = ContextVar("current_group", default="")  # which collection issued this request
 _next_id = count()
 
 
-TITLE_KEYS = ("name", "title", "topic", "display_info", "chat_name")
+TITLE_KEYS = ("name", "title", "topic", "display_info", "chat_name", "title_highlighted")
 LIST_KEYS = ("chats", "results", "messages", "nodes", "tables", "spaces", "users", "records", "minutes", "meetings", "items")
 
 
@@ -78,13 +80,53 @@ def _summarise(payload) -> str:
     return _title(data)
 
 
+def oneline(text, limit: int = 60) -> str:
+    """Collapse to a single line and bound its length, for progress display."""
+    flat = " ".join(str(text or "").split())
+    return flat[: limit - 1] + "…" if len(flat) > limit else flat
+
+
 def _title(item) -> str:
     if not isinstance(item, dict):
         return ""
     for key in TITLE_KEYS:
         if isinstance(v := item.get(key), str) and v.strip():
-            return " ".join(v.split())[:48]
+            return oneline(unescape_entities(v.replace("<h>", "").replace("</h>", "")), 48)
+    if isinstance(nested := item.get("result_meta"), dict):
+        return _title(nested)  # drive search nests the fields one level down
     return ""
+
+
+RE_ENTITY = compile(r"&(#\d+|#[xX][0-9a-fA-F]+|\w+);")
+
+
+def unescape_entities(text: str) -> str:
+    """Decode only the semicolon form. `html.unescape` also decodes entities written
+    without one, so a URL carrying `&timestamp=` or `&notify=` silently loses characters.
+    """
+    return RE_ENTITY.sub(lambda m: unescape(m[0]), text)
+
+
+TENANT = "https://acme.feishu.cn"
+
+
+def link_for(token: str) -> str:
+    """Best-effort Feishu URL for an opaque token, so a feed line can be clicked.
+
+    Prefixes are the only signal available -- the CLI takes bare tokens and never tells us
+    what kind of object they name -- but they are stable and unambiguous in practice.
+    """
+    if token.startswith("oc_"):
+        return f"https://applink.feishu.cn/client/chat/open?openChatId={token}"
+    if token.startswith("ou_"):
+        return f"https://applink.feishu.cn/client/contact/open?openId={token}"
+    if token.startswith("obc"):
+        return f"{TENANT}/minutes/{token}"
+    if token.startswith("tbl") or token.startswith("bas"):
+        return f"{TENANT}/base/{token}"
+    if token.isdigit():
+        return f"{TENANT}/wiki/settings/{token}" if len(token) > 15 else ""
+    return f"{TENANT}/wiki/{token}"
 
 
 def _label(argv: tuple[str, ...]) -> tuple[str, str]:
@@ -172,7 +214,7 @@ def _parse(text: str) -> Any | None:
     return None
 
 
-async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
+async def run(*argv: str, retries: int = 5, cwd: str | None = None, subject: str = "") -> Any:
     """Run a lark-cli command expecting JSON on stdout. Returns the `data` field."""
     Aborted.check()
     args = ["lark-cli", *argv, "--format", "json"]
@@ -180,7 +222,9 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
     for attempt in range(retries):
         async with _sem:
             rid = next(_next_id)
-            activity.start(rid, current_group.get(), *_label(argv))
+            if feed_enabled:
+                domain, guessed = _label(argv)
+                activity.start(rid, current_group.get(), domain, subject or guessed)
             failed = True
             outcome = ""
             payload = None
@@ -189,7 +233,7 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
                 out, stderr = await proc.communicate()
                 failed = False
                 payload = _parse(out.decode(errors="replace"))
-                outcome = _summarise(payload)
+                outcome = "" if subject else (_summarise(payload) if feed_enabled else "")
             except CancelledError:
                 # ctrl-c: kill the child and *wait for it*. Without the wait, asyncio reaps the
                 # subprocess transport after the loop has closed and complains "Loop ... is closed".
@@ -199,7 +243,8 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
                         await shield(proc.wait())
                 raise
             finally:
-                activity.finish(rid, "error" if failed else "done", outcome)
+                if feed_enabled:
+                    activity.finish(rid, "error" if failed else "done", outcome)
         if payload is None:
             raise LarkError(list(argv), {"error": {"message": (out.decode(errors="replace") or stderr.decode(errors="replace") or f"exit {proc.returncode}")[:400]}})
         if payload.get("ok"):
@@ -220,6 +265,7 @@ async def paginate(*argv: str, key: str, page_size: int = 20, prefetch: bool = F
     two, so without this the caller does all its work in one burst and then idles --
     which reads as a frozen counter rather than steady progress.
     """
+
     async def fetch(token: str | None):
         try:
             return await run(*argv, "--page-size", str(page_size), *(["--page-token", token] if token else []))
