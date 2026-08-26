@@ -8,7 +8,7 @@ from re import findall
 from lark_fs import cli
 from lark_fs.attachments import Policy, _pending, _settle
 from lark_fs.store import Store
-from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, _note_tenant, _wiki_aliases, _windows
+from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _note_tenant, _wiki_aliases, _windows
 from lark_fs.yaml import readable_yaml_dumps
 
 
@@ -183,3 +183,52 @@ def test_the_marker_records_the_size_that_disqualified_it(tmp_path):
     assert _settle(dest, {"saved_path": str(big), "size_bytes": 30_000_000}, 10_000_000) is False
     assert not big.exists(), "an oversize file is not kept"
     assert (dest / ".oversize").read_text() == "30000000"
+
+
+def _graph_probe(monkeypatch, sweep: float = 0.08) -> list[str]:
+    """Replace every collection with a recorder, so what is measured is the dependency
+    graph rather than any API. The sweep is the only slow one, as it is in a real run."""
+    from lark_fs import sync as sync_module
+
+    order: list[str] = []
+
+    def stub(name: str, delay: float = 0.0, ret=None):
+        async def record(*_a, **_k):
+            order.append(f"{name}:start")
+            if delay:
+                await sleep(delay)
+            order.append(f"{name}:done")
+            return ret
+
+        return record
+
+    monkeypatch.setattr(sync_module, "_learn_tenant", lambda _store: None)
+    monkeypatch.setattr(sync_module, "_list_chats", stub("roster", 0.0, {"oc_1"}))
+    monkeypatch.setattr(sync_module, "sync_messages", stub("messages", sweep, {"oc_1"}))
+    monkeypatch.setattr(sync_module, "sync_chat_meta", stub("chats"))
+    for name in ("sync_wiki", "sync_docs", "sync_minutes", "sync_meetings", "sync_bases"):
+        monkeypatch.setattr(sync_module, name, stub(name.removeprefix("sync_")))
+    monkeypatch.setattr(sync_module, "sync_attachments", stub("files"))
+    return order
+
+
+def test_a_pass_nobody_awaits_is_not_abandoned(tmp_path, monkeypatch):
+    """`gather` returns as soon as the listed tasks finish, so a producer left off that
+    list keeps running into a process that is already printing its summary -- the sweep
+    stops mid-flight and the run still reports success."""
+    from lark_fs.sync import sync_all
+
+    order = _graph_probe(monkeypatch)
+    run(sync_all(tmp_path, Progress(), ["messages"]))
+    assert "messages:done" in order, "the sweep was abandoned when gather returned"
+
+
+def test_the_roster_pass_does_not_wait_out_the_message_sweep(tmp_path, monkeypatch):
+    """Both passes want the same one-request roster. Taking it from the sweep's return
+    value instead made a pass that is usually a no-op sit through every message in every
+    chat first -- and put its cheap work after the rate limit that interrupts the sweep."""
+    from lark_fs.sync import sync_all
+
+    order = _graph_probe(monkeypatch)
+    run(sync_all(tmp_path, Progress(), ["messages", "chats"]))
+    assert order.index("chats:done") < order.index("messages:done"), f"roster pass waited for the sweep: {order}"

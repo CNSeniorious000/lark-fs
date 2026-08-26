@@ -675,23 +675,36 @@ ALL = ["messages", "chats", "docs", "minutes", "meetings", "bases", "wiki", "fil
 async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     """Run every collection concurrently.
 
-    Two real dependencies exist -- chats wants the chat ids messages discovered, and docs
-    mines wiki's node list for tokens that search misses -- but neither justifies blocking
-    the whole run: each dependent awaits just its producer, so the independent collections
-    make progress from the first second instead of idling behind the message sweep.
+    The edges are between the values that are actually needed, not between the passes that
+    happen to produce them: the chat roster is one request, so both the message sweep and
+    the roster pass await *it* rather than one of them awaiting the other. Two real waits
+    remain -- files wants the media index the sweep writes at its end, and docs mines
+    wiki's node list -- and both are end-of-pass by nature.
+
+    None of this buys throughput on its own: one global semaphore of CONCURRENCY is the
+    real scheduler, and a saturated sweep already holds every slot. What it buys is that a
+    cheap pass reports promptly instead of after a sweep, and does its work before the
+    rate limit that will eventually interrupt one.
     """
     store = Store(root)
     _learn_tenant(store)
     want = set(only or ALL)
     tasks = []
 
-    messages = create_task(sync_messages(store, p)) if "messages" in want else None
+    # The roster is one request, and it is all the chat pass ever wanted. It used to be
+    # taken from the message sweep's return value -- which meant waiting out a sweep of
+    # every message in every chat for a set that sync_messages computes on its first line.
+    roster = create_task(_list_chats(store)) if want & {"messages", "chats"} else None
+
+    async def walk_messages():
+        return await sync_messages(store, p, chat_ids=await roster if roster else None)
+
+    messages = create_task(walk_messages()) if "messages" in want else None
     wiki = create_task(sync_wiki(store, p)) if "wiki" in want else None
 
     async def chats():
-        # a rate-limited message sweep must not take the roster down with it
-        found = (await messages) or set() if messages else set()
-        await sync_chat_meta(store, p, found)
+        # depends on the roster, not on the sweep, so a rate-limited sweep cannot take it down
+        await sync_chat_meta(store, p, await roster if roster else set())
 
     async def docs():
         if wiki:
@@ -718,11 +731,10 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     if "bases" in want:
         tasks.append(sync_bases(store, p))
 
-    # producers are awaited by their dependents; await them here only if nobody else will
-    if messages and "chats" not in want:
-        tasks.append(messages)
-    if wiki and "docs" not in want:
-        tasks.append(wiki)
+    # A producer is also awaited here. A task can be awaited more than once, so this costs
+    # nothing and removes the need to keep "who else awaits this" in step with the graph --
+    # get that wrong and the task is simply abandoned when gather returns.
+    tasks += [t for t in (roster, messages, wiki) if t]
 
     await gather(*tasks)
     store.save_cursors()
