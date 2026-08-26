@@ -12,7 +12,7 @@ from typing import Any
 CONCURRENCY = 3  # lark's open API rate-limits aggressively; keep this low
 _sem = Semaphore(CONCURRENCY)
 
-FEED_LIMIT = 10  # how many recent requests the TUI shows
+FEED_LIMIT = 40  # per-group history depth; the TUI decides how much of it to show
 
 
 class Activity:
@@ -29,10 +29,17 @@ class Activity:
     def start(self, rid: int, group: str, domain: str, subject: str):
         self.running[rid] = (group, domain, subject)
 
-    def finish(self, rid: int, state: str):
+    def finish(self, rid: int, state: str, result: str = ""):
+        """`result` describes what came back -- a title, a name, a count -- which is far
+        more useful than the request parameters once a call has completed."""
         if entry := self.running.pop(rid, None):
             group, domain, subject = entry
-            self.done[group].append((domain, subject, state))
+            # an opaque token adds nothing once the reply names what it held, but a time
+            # window is that request's identity -- drop the former, keep the latter
+            verb, _, arg = subject.partition(" ")
+            keep = arg if RE_DATE.fullmatch(arg) else ""
+            head = f"{verb} {keep}".strip()
+            self.done[group].append((domain, f"{head} {result}" if result else subject, state))
 
     def rows(self, group: str, limit: int) -> list[tuple[str, str, str]]:
         live = [(d, s, "running") for g, d, s in self.running.values() if g == group]
@@ -45,6 +52,39 @@ class Activity:
 activity = Activity()
 current_group: ContextVar[str] = ContextVar("current_group", default="")  # which collection issued this request
 _next_id = count()
+
+
+TITLE_KEYS = ("name", "title", "topic", "display_info", "chat_name")
+LIST_KEYS = ("chats", "results", "messages", "nodes", "tables", "spaces", "users", "records", "minutes", "meetings", "items")
+
+
+def _summarise(payload) -> str:
+    """Describe what a response actually contained, for the activity feed.
+
+    A request's parameters are opaque ids; the reply carries names and counts, which is
+    what makes a line worth reading. Single results show their title, lists show a count
+    plus the first title so consecutive pages stay distinguishable.
+    """
+    data = (payload or {}).get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return ""
+    for key in LIST_KEYS:
+        if isinstance(items := data.get(key), list):
+            if not items:
+                return "empty"  # an empty window is a result too; saying so beats echoing the query
+            head = _title(items[0])
+            label = "" if key == "items" else f" {key}"
+            return f"{len(items)}{label}" + (f" · {head}" if head else "")
+    return _title(data)
+
+
+def _title(item) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for key in TITLE_KEYS:
+        if isinstance(v := item.get(key), str) and v.strip():
+            return " ".join(v.split())[:48]
+    return ""
 
 
 def _label(argv: tuple[str, ...]) -> tuple[str, str]:
@@ -65,6 +105,7 @@ def _label(argv: tuple[str, ...]) -> tuple[str, str]:
 
 
 RE_ID = compile(r"(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{8,}")
+RE_DATE = compile(r"\d{4}-\d{2}-\d{2}")
 RE_CODE = compile(r'"code":\s*(\d+)')
 
 
@@ -141,10 +182,14 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
             rid = next(_next_id)
             activity.start(rid, current_group.get(), *_label(argv))
             failed = True
+            outcome = ""
+            payload = None
             try:
                 proc = await create_subprocess_exec(*args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
                 out, stderr = await proc.communicate()
                 failed = False
+                payload = _parse(out.decode(errors="replace"))
+                outcome = _summarise(payload)
             except CancelledError:
                 # ctrl-c: kill the child and *wait for it*. Without the wait, asyncio reaps the
                 # subprocess transport after the loop has closed and complains "Loop ... is closed".
@@ -154,8 +199,7 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
                         await shield(proc.wait())
                 raise
             finally:
-                activity.finish(rid, "error" if failed else "done")
-        payload = _parse(out.decode(errors="replace"))
+                activity.finish(rid, "error" if failed else "done", outcome)
         if payload is None:
             raise LarkError(list(argv), {"error": {"message": (out.decode(errors="replace") or stderr.decode(errors="replace") or f"exit {proc.returncode}")[:400]}})
         if payload.get("ok"):

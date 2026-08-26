@@ -65,6 +65,11 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
   the next request first and spreads the current page across its flight time, so counters
   advance steadily. Measure repaints by counting PTY writes — matching whole lines misses
   partial redraws and makes a live UI look dead.
+- A feed line should say what came back, not what was asked: `_summarise` pulls a count
+  and a title out of the response, and the opaque request token is dropped once it
+  returns (a time window is kept -- it *is* that request's identity). Verify feed changes
+  against a real terminal with pyte; regex-splitting raw PTY bytes misreads partial
+  redraws and will tell you a live UI is dead.
 - The request feed is grouped per collection and shares a fixed line budget: only running
   collections get feed lines, so the layout never outgrows the screen. `cli.activity` owns
   that state, keyed by the `cli.current_group` ContextVar each syncer sets on entry.
