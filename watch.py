@@ -1,37 +1,65 @@
-"""HMR entry point: `hmr watch.py` keeps the mirror fresh while you edit the code.
+"""HMR entry point: `uv run watch.py` keeps the mirror fresh while you edit the code.
 
-hmr reloads by re-executing this file's top level, so the daemon loop has to live here
-rather than inside something that outlives the reload -- and it has to yield when a
-reload is pending, or hmr would sit waiting for a loop that never ends. `pre_reload`
-raises the same cooperative stop that ctrl-c uses, and re-entry starts the new code.
+Three things have to line up for hot reload to actually take effect here, and each one
+fails silently on its own:
 
-State lives on disk, which is exactly what a mirror wants: an edit costs one interrupted
-sweep, and the cursors mean the next pass picks up where that one stopped.
+1. `hmr watch.py` cannot work for this program. That CLI runs the entry file
+   *synchronously* and only starts its file watcher afterwards, so an entry that blocks
+   in `asyncio.run` never lets watching begin. `SyncReloaderAPI` watches on its own
+   thread, so the loop below can run indefinitely.
+2. The package must be imported *after* the reloader exists. Creating it patches
+   `sys.meta_path`; anything imported earlier is held by the ordinary loader and is
+   invisible to reloads.
+3. Every call has to go through the module object. A reload rebinds names inside a
+   module, so a `from lark_fs.daemon import watch` here would capture the old function
+   and keep calling it forever.
 
-    hmr watch.py [--root DIR] [--interval SECONDS]
+State lives on disk, so an edit costs one interrupted sweep and the cursors resume it.
+
+    uv run watch.py [--root DIR] [--interval SECONDS]
 """
 
 from asyncio import run
+from importlib import import_module
+from pathlib import Path
 from sys import argv
 
-from reactivity.hmr import pre_reload
+from reactivity.hmr import post_reload
+from reactivity.hmr.api import SyncReloaderAPI
 
-from lark_fs.cli import Aborted, SyncAbortedError
-from lark_fs.daemon import Schedule, watch
-from lark_fs.main import build_parser
-from lark_fs.sync import ALL
-from lark_fs.tui import run_with_tui
+SRC = Path(__file__).parent / "src"
+# The reloader re-executes its entry on every reload, so it must not be this file --
+# `__enter__` would run watch.py again and recurse until the stack gives out -- nor a
+# package module, which breaks its relative imports when run as `__main__`. A dedicated
+# empty file is the only thing that is safe to re-execute.
+ENTRY = Path(__file__).parent / "_reload_entry.py"
 
+with SyncReloaderAPI(str(ENTRY), includes=[str(SRC)]):
+    # `from lark_fs import main` would bind the package's `main()` function, not the
+    # module of the same name; import_module keeps them distinct.
+    cli, daemon, main, sync, tui = (import_module(f"lark_fs.{m}") for m in ("cli", "daemon", "main", "sync", "tui"))
 
-@pre_reload
-def stop_for_reload():
-    Aborted.flag = True
+    args = main.build_parser().parse_args(["watch", *argv[1:]])
+    rows = [*sync.ALL, "recheck", "daemon"]
+    # A reload updates the modules, but the run in flight already built its view closures
+    # and Application from the old ones. Ending the cycle is what puts the new code on
+    # screen; the loop below immediately starts another.
+    reloaded: list[bool] = []
 
+    @post_reload
+    def restart_on_reload():
+        reloaded.append(True)
+        cli.Aborted.flag = True
 
-args = build_parser().parse_args(["watch", *argv[1:]])
-Aborted.flag = False  # clear the stop the previous generation exited on
-
-try:
-    run(run_with_tui(lambda p: watch(args.root, p, Schedule(messages=args.interval)), [*ALL, "recheck", "daemon"]))
-except SyncAbortedError, KeyboardInterrupt:
-    pass
+    while True:
+        reloaded.clear()
+        cli.Aborted.flag = False
+        try:
+            run(tui.run_with_tui(lambda p: daemon.watch(args.root, p, daemon.Schedule(messages=args.interval)), rows))
+        except KeyboardInterrupt:
+            break
+        except cli.SyncAbortedError:
+            # the same exception means "reload me" or "the user pressed ctrl-c"; only the
+            # reload hook distinguishes them, and guessing wrong makes the app unquittable
+            if not reloaded:
+                break

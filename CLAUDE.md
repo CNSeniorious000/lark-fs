@@ -59,6 +59,27 @@ Message bodies carry control characters and U+2028 line separators; unstripped, 
 silently corrupt a literal block's indentation and the file stops parsing. `_sanitize`
 handles this — verify any renderer change with `yaml.safe_load` over a real sync.
 
+## Hot reload (watch.py)
+
+`uv run watch.py` reloads edited code into the running daemon. Five things must hold, and
+each fails silently on its own — verify with a marker that appears on *every* feed line,
+not one that only shows in a transient state:
+
+- Do not use the `hmr` CLI. It runs the entry synchronously and only starts watching
+  afterwards, so an entry that blocks in `asyncio.run` never gets a watcher.
+  `SyncReloaderAPI` watches on its own thread.
+- The reloader re-executes its entry each time, so the entry cannot be watch.py (infinite
+  recursion) nor a package module (its relative imports break as `__main__`).
+  `_reload_entry.py` exists solely for this.
+- That entry must import the package. The reloader tracks what its entry touches; an
+  empty one warns "has no dependencies and will never be auto-triggered" and never fires.
+- Import the package only *after* the reloader exists — it patches `sys.meta_path`, and
+  anything imported earlier is invisible to reloads.
+- Reloading updates module namespaces in place, but a `run_with_tui` call already in
+  flight built its closures from the old ones. The `post_reload` hook ends that cycle so
+  the loop starts a new one. Ctrl-C raises the *same* exception as that abort, so the
+  hook's flag is the only way to tell them apart — conflate them and the app cannot quit.
+
 ## Invariants
 
 - Do not scan from a fixed start date. `_earliest` reads where the store's own data
