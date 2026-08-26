@@ -5,6 +5,7 @@ carries only a key and a filename -- so the size limit is enforced after the fac
 kind whitelist is what actually bounds the request count.
 """
 
+from collections.abc import Iterable
 from pathlib import Path
 from tomllib import loads
 from typing import TYPE_CHECKING
@@ -37,22 +38,30 @@ kinds = ["text"]
 # Checked after downloading -- Lark does not report a size in advance. Anything larger is
 # deleted and remembered, so it is not fetched again.
 max_mb = 10
+
+# Fetched whatever their kind, for extensions the lists above miss. A tenant's own
+# conventions live here: `.jsonl.gz` dumps, `.prompt` files, an in-house log suffix.
+extensions = []
 """
 
 
 class Policy:
-    def __init__(self, kinds: set[str], max_bytes: int):
+    def __init__(self, kinds: set[str], max_bytes: int, extensions: Iterable[str] = ()):
         self.kinds, self.max_bytes = kinds, max_bytes
+        self.extra = {e.lower().lstrip(".") for e in extensions}
 
     def wants(self, key: str, name: str) -> bool:
-        return self.kind(key, name) in self.kinds
+        return (bool(name) and _ext(name) in self.extra) or self.kind(key, name) in self.kinds
 
     @staticmethod
     def kind(key: str, name: str) -> str:
         if not name:  # images embedded in a rich-text message arrive unnamed
             return "image" if key.startswith("img_") else ""
-        ext = name.rsplit(".", 1)[-1].lower() if "." in name else name.lower()
-        return next((k for k, exts in KINDS.items() if ext in exts), "")
+        return next((k for k, exts in KINDS.items() if _ext(name) in exts), "")
+
+
+def _ext(name: str) -> str:
+    return (name.rsplit(".", 1)[-1] if "." in name else name).lower()
 
 
 def policy_for(store: Store) -> Policy:
@@ -62,7 +71,7 @@ def policy_for(store: Store) -> Policy:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(DEFAULT_CONFIG)
     section = loads(path.read_text()).get("attachments", {})
-    return Policy(set(section.get("kinds", ["text"])), int(section.get("max_mb", 10) * 1024 * 1024))
+    return Policy(set(section.get("kinds", ["text"])), int(section.get("max_mb", 10) * 1024 * 1024), section.get("extensions", ()))
 
 
 def _dir(store: Store, row: dict) -> Path:

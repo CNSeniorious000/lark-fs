@@ -110,3 +110,11 @@ def test_an_oversize_marker_stops_the_retry(tmp_path):
     row = {"key": "file_1", "name": "huge.md", "chat_id": "oc_1", "message_id": "om_1"}
     store.write(f"chats/oc_1/files/{row['key']}/.oversize", "")
     assert _pending(store, Policy({"text"}, 1), [row]) == []
+
+
+def test_an_extension_escape_hatch_beats_the_kind_lists(tmp_path):
+    """The built-in lists will always miss a tenant's own conventions."""
+    store = Store(tmp_path)
+    rows = [{"key": "file_1", "name": "dump.prompt", "chat_id": "oc_1", "message_id": "om_1"}]
+    assert _pending(store, Policy({"text"}, 1), rows) == []
+    assert _pending(store, Policy({"text"}, 1, [".PROMPT"]), rows) == rows

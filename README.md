@@ -59,6 +59,7 @@ the first run:
 [attachments]
 kinds = ["text"]   # text, image, video, audio, doc, archive
 max_mb = 10
+extensions = []    # fetched whatever their kind, for anything the lists miss
 ```
 
 `text` covers everything `rg` can read — source, config, logs, csv, json, subtitles, svg —
