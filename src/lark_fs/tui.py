@@ -15,12 +15,21 @@ from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
 from reactivity import derived, effect, signal
 
-from .cli import CONCURRENCY, SyncAbortedError, in_flight
+from .cli import FEED_LIMIT, SyncAbortedError, activity
 from .sync import ALL, Progress
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 GLYPH = {"pending": "<dim>·</dim>", "running": "", "done": "<ok>✓</ok>", "error": "<err>✗</err>"}
-STYLE = Style.from_dict({"ok": "#22c55e", "err": "#ef4444", "dim": "#6b7280", "name": "bold", "num": "#eab308"})
+STYLE = Style.from_dict({
+    "ok": "#22c55e",
+    "err": "#ef4444",
+    "dim": "#6b7280",
+    "name": "bold",
+    "num": "#eab308",
+    "live": "#3b82f6",  # in flight
+    "muted": "#6b7280",  # already settled
+    "dom": "#a1a1aa",  # feed's first column: readable, but quieter than the collection names
+})
 
 
 def _line(row: dict, frame: str, width: int) -> str:
@@ -34,10 +43,24 @@ def _line(row: dict, frame: str, width: int) -> str:
     return head + (f" <dim>{escape(tail[:room])}</dim>" if tail else "")
 
 
-def _fetching(width: int) -> list[str]:
-    """bun-style live view of what is on the wire right now, newest last."""
-    labels = list(in_flight.values())
-    return [f"  <dim>{escape(label[: width - 4])}</dim>" for label in labels]
+FEED_MARK = {"running": ("<live>→</live>", "live"), "done": ("<ok>✓</ok>", "muted"), "error": ("<err>✗</err>", "muted")}
+
+
+def _feed(width: int) -> list[str]:
+    """Recent requests, oldest first: finished ones drift up, in-flight stay at the bottom.
+
+    Two aligned columns -- domain, then subject -- so the eye can scan either one.
+    """
+    rows = activity.rows()
+    if not rows:
+        return []
+    col = max(len(domain) for domain, _, _ in rows)
+    room = max(8, width - col - 6)
+    lines = []
+    for domain, subject, state in rows:
+        mark, tone = FEED_MARK[state]
+        lines.append(f"  {mark} <dom>{domain:<{col}}</dom> <{tone}>{escape(subject[:room])}</{tone}>")
+    return lines
 
 
 async def run_plain(coro_factory, names: list[str] | None = None):
@@ -78,10 +101,10 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
         """Tracks progress.rows and the spinner, so the effect below knows when to redraw."""
         width = get_app().output.get_size().columns
         lines = [_line(progress.rows[n], frame.get(), width) for n in rows if n in progress.rows]
-        return HTML("\n".join(lines + _fetching(width)))
+        return HTML("\n".join(lines + _feed(width)))
 
     # height must cover the collection rows plus every concurrent request line
-    body = Window(FormattedTextControl(view), height=len(rows) + CONCURRENCY, dont_extend_height=True, always_hide_cursor=True)
+    body = Window(FormattedTextControl(view), height=len(rows) + FEED_LIMIT, dont_extend_height=True, always_hide_cursor=True)
     kb = KeyBindings()
     interrupted = False
 

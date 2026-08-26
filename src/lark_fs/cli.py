@@ -1,6 +1,7 @@
 """Thin async wrapper around the `lark-cli` binary."""
 
 from asyncio import CancelledError, Semaphore, create_subprocess_exec, create_task, sleep, subprocess
+from collections import deque
 from contextlib import suppress
 from itertools import count, pairwise
 from json import JSONDecoder
@@ -10,24 +11,54 @@ from typing import Any
 CONCURRENCY = 3  # lark's open API rate-limits aggressively; keep this low
 _sem = Semaphore(CONCURRENCY)
 
-in_flight: dict[int, str] = {}  # request id -> label, so the TUI can show what is being fetched
+FEED_LIMIT = 10  # how many recent requests the TUI shows
+
+
+class Activity:
+    """A rolling log of requests for the TUI: what finished, and what is in flight.
+
+    Finished entries drift up and out; running ones stay pinned at the bottom, so a row
+    does not jump position the moment it completes.
+    """
+
+    def __init__(self):
+        self.done: deque[tuple[str, str, str]] = deque(maxlen=FEED_LIMIT)  # (domain, subject, state)
+        self.running: dict[int, tuple[str, str]] = {}
+
+    def start(self, rid: int, domain: str, subject: str):
+        self.running[rid] = (domain, subject)
+
+    def finish(self, rid: int, state: str):
+        if entry := self.running.pop(rid, None):
+            self.done.append((*entry, state))
+
+    def rows(self, limit: int = FEED_LIMIT) -> list[tuple[str, str, str]]:
+        live = [(d, s, "running") for d, s in self.running.values()]
+        return (list(self.done) + live)[-limit:]
+
+
+activity = Activity()
 _next_id = count()
 
 
-def _label(argv: tuple[str, ...]) -> str:
-    """`("minutes", "+detail", "--minute-tokens", "obc...")` -> `minutes +detail obc...`
+def _label(argv: tuple[str, ...]) -> tuple[str, str]:
+    """Split a command into (domain, subject) so the feed can align them in columns.
 
-    The interesting part is the first flag *value* -- an id or token -- so pair each
-    `--flag` with what follows it and take the first one that looks like an argument.
+    `("minutes", "+detail", "--minute-tokens", "obc...")` -> `("minutes", "+detail obc...")`.
+    The subject takes an id-looking flag value -- an opaque token, not an enum-ish option
+    like `markdown` or `p2p,group` -- preferring the last, since a child node token
+    identifies the work better than the parent space it lives under.
     """
-    head = " ".join(argv[:2])
-    # an id-looking flag value: opaque tokens, not enum-ish options like `markdown` or `p2p,group`.
-    # Prefer the last one -- a child node token identifies the work better than its parent space.
+    verb = argv[1].lstrip("+") if len(argv) > 1 else ""
+    flags = dict(pairwise(argv))
+    # a time-windowed sweep is better identified by its window than by any token in it
+    if start := flags.get("--start"):
+        return argv[0], f"{verb} {start[:10]}"
     ids = [v for f, v in pairwise(argv) if f.startswith("--") and RE_ID.fullmatch(v)]
-    return f"{head} {ids[-1] if ids else ''}".strip()
+    return argv[0], f"{verb} {ids[-1]}".strip() if ids else verb
 
 
-RE_ID = compile(r"[A-Za-z0-9_]*[A-Z0-9][A-Za-z0-9_]{7,}")
+RE_ID = compile(r"(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{8,}")
 RE_CODE = compile(r'"code":\s*(\d+)')
 
 
@@ -102,17 +133,19 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None) -> Any:
     for attempt in range(retries):
         async with _sem:
             rid = next(_next_id)
-            in_flight[rid] = _label(argv)
+            activity.start(rid, *_label(argv))
+            failed = True
             try:
                 proc = await create_subprocess_exec(*args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
                 out, stderr = await proc.communicate()
+                failed = False
             except CancelledError:
                 # ctrl-c: kill the child instead of letting its pending read surface as an unhandled error
                 with suppress(ProcessLookupError, UnboundLocalError):
                     proc.kill()
                 raise
             finally:
-                del in_flight[rid]
+                activity.finish(rid, "error" if failed else "done")
         payload = _parse(out.decode(errors="replace"))
         if payload is None:
             raise LarkError(list(argv), {"error": {"message": (out.decode(errors="replace") or stderr.decode(errors="replace") or f"exit {proc.returncode}")[:400]}})
