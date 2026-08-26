@@ -260,6 +260,58 @@ def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
     return bool(remote and remote > body.stat().st_mtime)
 
 
+def _edit_signal(msg: dict) -> tuple:
+    """What actually changes when a message is edited."""
+    return (msg.get("update_time") or "", msg.get("content") or "", bool(msg.get("updated")))
+
+
+async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, batch: int = 50):
+    """Re-verify recently synced messages, since edits and recalls leave no forward trace.
+
+    `+messages-search` cannot filter by update time and never returns recalled messages,
+    but `+messages-mget` reports `update_time` per id. So we replay the ids we already
+    have from the last `window_days` and rewrite only what actually changed -- one request
+    per 50 messages, which is far cheaper than re-fetching the window.
+    """
+    cli.current_group.set("messages")
+    cutoff = (datetime.now(UTC) - timedelta(days=window_days)).strftime("%Y-%m")
+    recent = sorted((f for f in (store.root / "chats").glob("*/messages/*/*.yaml") if f.parent.name >= cutoff), key=lambda f: f.parent.name, reverse=True)
+    if not recent:
+        return
+    p.set("recheck", state="running", total=len(recent))
+
+    by_id = {f.stem: f for f in recent}
+    ids = list(by_id)
+    changed = 0
+    recalled: list[dict] = []
+    for i in range(0, len(ids), batch):
+        chunk = ids[i : i + batch]
+        try:
+            data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(chunk), "--no-reactions")
+        except cli.LarkError:
+            p.bump("recheck", len(chunk))
+            continue
+        returned = {m["message_id"]: m for m in (data or {}).get("messages") or []}
+        for mid in chunk:
+            if not (msg := returned.get(mid)):
+                # recalled: it is gone from the server, but the local copy is the only
+                # record left, so mark it rather than delete it
+                recalled.append({"message_id": mid, "path": str(by_id[mid].relative_to(store.root))})
+                continue
+            # mget returns a wider field set than search, so comparing whole payloads
+            # would rewrite every file; the edit signal is update_time plus the body
+            rel = str(by_id[mid].relative_to(store.root))
+            before = store.read_yaml(rel)
+            if _edit_signal(msg) != _edit_signal(before):
+                merged = {**before, **_clean(msg)}
+                store.write_yaml(rel, merged)
+                changed += 1
+        p.bump("recheck", len(chunk), last=f"{changed} changed, {len(recalled)} recalled")
+    if recalled:
+        store.write_yaml("recalled.yaml", recalled)
+    p.set("recheck", state="done", note=f"{changed} updated, {len(recalled)} recalled")
+
+
 def _oneline(text, limit: int = 60) -> str:
     """Collapse a message body to a single short line for the progress display."""
     flat = " ".join(str(text or "").split())
@@ -272,11 +324,17 @@ def _rows(payload: dict) -> list[dict]:
     return [{"record_id": rid, **dict(zip(fields, row, strict=False))} for rid, row in zip(ids, data, strict=False)]
 
 
+# `html.unescape` also decodes entities written without a semicolon, so a URL carrying
+# `&timestamp=` or `&notify=` silently loses those characters to the `times` and `not`
+# entities. Lark always emits the semicolon form, so only that is safe to decode.
+RE_ENTITY = compile(r"&(#\d+|#[xX][0-9a-fA-F]+|\w+);")
+
+
 def _clean(value):
     """Lark's search endpoints return HTML-entity-escaped text with <h> hit markers.
     Left as-is those become `&lt;b&gt;` on disk, which breaks plain-text grep."""
     if isinstance(value, str):
-        return unescape(value.replace("<h>", "").replace("</h>", ""))
+        return RE_ENTITY.sub(lambda m: unescape(m[0]), value.replace("<h>", "").replace("</h>", ""))
     if isinstance(value, dict):
         return {k: _clean(v) for k, v in value.items()}
     if isinstance(value, list):

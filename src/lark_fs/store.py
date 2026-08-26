@@ -28,6 +28,8 @@ from json import dumps, loads
 from pathlib import Path
 from typing import Any
 
+from yaml import YAMLError, safe_load
+
 from .yaml import readable_yaml_dumps
 
 
@@ -80,6 +82,16 @@ class Store:
             if rows and key:
                 rows[-1][key] = value.strip().strip("'")
         return rows
+
+    def read_yaml(self, rel: str) -> dict:
+        """Load back a mapping this store wrote. Returns {} when absent or unparseable."""
+        path = self.root / rel
+        if not path.exists():
+            return {}
+        try:
+            return safe_load(path.read_text()) or {}
+        except YAMLError:
+            return {}
 
     def exists(self, rel: str) -> bool:
         return (self.root / rel).exists()

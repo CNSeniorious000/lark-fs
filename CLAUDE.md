@@ -36,7 +36,14 @@ Known traps, all hit in practice:
 - `minutes +detail --transcript` writes `<cwd>/minutes/<token>/transcript.txt` itself
   instead of returning it, so it must run with `cwd` set to the store root.
 - Search endpoints return HTML-entity-escaped text with `<h>` hit markers; unescape it
-  or the on-disk copy is not greppable.
+  or the on-disk copy is not greppable. Use `_clean`, never bare `html.unescape` — the
+  stdlib also decodes semicolon-less entities, so `&timestamp=` in a URL silently becomes
+  a multiplication sign and `&notify=` a negation sign.
+- Each entity has its own freshness signal, and they are not interchangeable:
+  docs carry an authoritative `update_time`; messages expose one only through
+  `+messages-mget` (never through search) and `updated` is a permanent flag, not a
+  recency hint; recalled messages simply vanish from search, so the local copy is the
+  only remaining record. `recheck_messages` replays known ids to catch both.
 
 ## YAML output must stay machine-readable
 
