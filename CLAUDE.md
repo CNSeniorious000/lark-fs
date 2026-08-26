@@ -63,16 +63,17 @@ Message bodies carry control characters and U+2028 line separators; unstripped, 
 silently corrupt a literal block's indentation and the file stops parsing. `_sanitize`
 handles this — verify any renderer change with `yaml.safe_load` over a real sync.
 
-## Hot reload (watch.py)
+## Hot reload (hmr.py)
 
-`uv run watch.py` reloads edited code into the running daemon. Five things must hold, and
+`uv run hmr.py <command>` reloads edited code into the running command -- `m sync` and
+`m lark-watch` both go through it. Five things must hold, and
 each fails silently on its own — verify with a marker that appears on *every* feed line,
 not one that only shows in a transient state:
 
 - Do not use the `hmr` CLI. It runs the entry synchronously and only starts watching
   afterwards, so an entry that blocks in `asyncio.run` never gets a watcher.
   `SyncReloaderAPI` watches on its own thread.
-- The reloader re-executes its entry each time, so the entry cannot be watch.py (infinite
+- The reloader re-executes its entry each time, so the entry cannot be hmr.py (infinite
   recursion) nor a package module (its relative imports break as `__main__`).
   `_reload_entry.py` exists solely for this.
 - That entry must import the package. The reloader tracks what its entry touches; an

@@ -37,7 +37,10 @@ reportUnnecessaryTypeIgnoreComment = "error"
 # `m` aliases -- register with: m alias add <name> "<cmd>"
 # Kept here so the shortcuts travel with the repo.
 [tool.m.aliases]
-sync = "uv run --project /Users/muspi-merol/Desktop/lark-fs lark-fs sync"
+# sync and watch go through hmr.py so an edit lands in the running TUI; status is over
+# before an edit could, so it skips the reloader.
+sync = "uv run --project /Users/muspi-merol/Desktop/lark-fs /Users/muspi-merol/Desktop/lark-fs/hmr.py sync"
+lark-watch = "uv run --project /Users/muspi-merol/Desktop/lark-fs /Users/muspi-merol/Desktop/lark-fs/hmr.py watch"
 lark-status = "uv run --project /Users/muspi-merol/Desktop/lark-fs lark-fs status"
 
 [dependency-groups]
