@@ -16,6 +16,7 @@ from typing import Any
 from reactivity import reactive
 
 from . import cli
+from .attachments import sync_attachments
 from .cli import Aborted
 from .store import Store
 
@@ -603,7 +604,7 @@ async def sync_wiki(store: Store, p: Progress):
     p.set("wiki", state="done")
 
 
-ALL = ["messages", "chats", "docs", "minutes", "meetings", "bases", "wiki"]
+ALL = ["messages", "chats", "docs", "minutes", "meetings", "bases", "wiki", "files"]
 
 
 async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
@@ -631,10 +632,19 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
             await wiki
         await sync_docs(store, p)
 
+    async def files():
+        # the media index is a by-product of the message sweep; on its own it reads
+        # whatever is already on disk, which is what `--only files` is for
+        if messages:
+            await messages
+        await sync_attachments(store, p)
+
     if "chats" in want:
         tasks.append(chats())
     if "docs" in want:
         tasks.append(docs())
+    if "files" in want:
+        tasks.append(files())
     if "minutes" in want:
         tasks.append(sync_minutes(store, p))
     if "meetings" in want:

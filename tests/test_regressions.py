@@ -6,6 +6,7 @@ from itertools import pairwise
 from re import findall
 
 from lark_fs import cli
+from lark_fs.attachments import Policy, _pending
 from lark_fs.store import Store
 from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, _windows
 from lark_fs.yaml import readable_yaml_dumps
@@ -88,3 +89,24 @@ def test_windows_tile_the_range_without_gaps_or_overlap():
 def test_windows_reach_past_now():
     """Stopping at the last whole window would leave today's messages unreachable."""
     assert _windows("2026-04-06 00:00", SLICE_HOURS)[-1][1] > datetime.now(TENANT_TZ).strftime(STAMP)
+
+
+def test_attachment_policy_admits_only_configured_kinds(tmp_path):
+    """Every admitted attachment is one request against a monthly quota; a wrong kind is spend."""
+    store = Store(tmp_path)
+    rows = [
+        {"key": "file_1", "name": "notes.md", "chat_id": "oc_1", "message_id": "om_1"},
+        {"key": "file_2", "name": "clip.mp4", "chat_id": "oc_1", "message_id": "om_2"},
+        {"key": "img_3", "name": "", "chat_id": "oc_1", "message_id": "om_3"},
+        {"key": "file_4", "name": "SHOUTED.MD", "chat_id": "oc_1", "message_id": "om_4"},
+    ]
+    assert [r["key"] for r in _pending(store, Policy({"text"}, 1), rows)] == ["file_1", "file_4"]
+    assert [r["key"] for r in _pending(store, Policy({"text", "video", "image"}, 1), rows)] == ["file_1", "file_2", "img_3", "file_4"]
+
+
+def test_an_oversize_marker_stops_the_retry(tmp_path):
+    """The marker is the only record that a file was too big -- the file itself is deleted."""
+    store = Store(tmp_path)
+    row = {"key": "file_1", "name": "huge.md", "chat_id": "oc_1", "message_id": "om_1"}
+    store.write(f"chats/oc_1/files/{row['key']}/.oversize", "")
+    assert _pending(store, Policy({"text"}, 1), [row]) == []

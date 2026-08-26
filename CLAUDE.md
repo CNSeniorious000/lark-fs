@@ -127,6 +127,11 @@ not one that only shows in a transient state:
   `--start`/`--end` windows -- those bounds are exclusive at the top, so windows tile
   without gaps or overlap. Never store a window boundary as the cursor: the last one ends
   in the future and would skip everything sent between now and then.
+- Lark never reports an attachment's size before it is downloaded -- the message body
+  carries only a key and a filename, and that is the API's own shape, not the CLI's. So
+  `max_mb` is enforced after the fact and the kind whitelist is what actually bounds the
+  request count. A chat embeds thousands of unnamed images (`img_*`, no filename), so
+  turning on `image` is a different order of spend from `text`.
 - Count attempts, not successes. A syncer that returns early on `LarkError` without
   bumping leaves the row at 218/256 forever. Put the `p.bump` in a `finally`.
 - One row, one denominator. A collection with a discovery pass and a fetch pass must

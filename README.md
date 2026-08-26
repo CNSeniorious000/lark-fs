@@ -6,7 +6,9 @@ built on top of an already-logged-in [`lark-cli`](https://github.com/larksuite/c
 ```sh
 m sync                      # incremental sync of everything
 m sync --only messages docs # just these collections
+m sync --only files         # fetch attachments for what is already indexed
 m lark-status               # counts per collection, no network
+m lark-watch                # poll for changes until interrupted
 lark-fs reindex             # rebuild users/ and media.yaml from messages on disk, no network
 ```
 
@@ -32,10 +34,12 @@ instead of being buried in `\n` escapes.
 ```
 <root>/
   .lark-fs/cursors.json               # per-collection incremental cursors
+  .lark-fs/config.toml                # which attachment kinds to mirror, and a size cap
   chats/<chat_id>/
     meta.yaml  members.yaml  media.yaml    # image/file keys referenced by this chat
     messages/<YYYY-MM>/<message_id>.yaml
     threads/<thread_id>/<message_id>.yaml
+    files/<file_key>/<original name>       # the attachment itself, when its kind is enabled
   users/<open_id>/meta.yaml
   docs/<doc_token>/{meta.yaml,content.md,comments.yaml}
   minutes/<token>/{meta.yaml,transcript.txt,summary.md,chapters.yaml,todos.yaml}
@@ -44,17 +48,40 @@ instead of being buried in `\n` escapes.
   wiki/<space_id>/{meta.yaml,nodes.yaml}
 ```
 
+## Attachments
+
+`media.yaml` always records every attachment key. Mirroring the *files* is opt-in per
+kind, because each one costs a request against the tenant's monthly quota and a chat can
+embed thousands of images. `.lark-fs/config.toml` is written with annotated defaults on
+the first run:
+
+```toml
+[attachments]
+kinds = ["text"]   # text, image, video, audio, doc, archive
+max_mb = 10
+```
+
+`text` covers everything `rg` can read — source, config, logs, csv, json, subtitles, svg —
+so an attached `.md` or `.jsonl` becomes searchable alongside the messages that carry it.
+Lark never reports a size in advance, so `max_mb` is enforced after downloading; anything
+over it is deleted and marked so it is not fetched again.
+
 ## Incrementality
 
 Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
 
-- **messages** are walked forward in 12-hour slices, committing the cursor after each one.
-  Two limits force this: `--page-all` caps at 40 pages (800 messages), so a wide window
-  silently truncates; and the endpoint rate-limits hard enough that a long run *will* be
-  cut short. An interrupted run resumes where it stopped rather than discarding its work.
+- **messages** are walked per chat, each with its own cursor committed as it advances, so
+  an interrupted run resumes where it stopped. The global `+messages-search` endpoint is a
+  trap here: it caps at 40 pages (800 messages) per query however the window is sliced.
+  A chat still going after 2000 messages has the rest of its range split into 12-hour
+  windows that page in parallel — one alert bot's chat holds 181875 messages, which is
+  3600+ pages if walked as a single sequence.
 - **docs / minutes / meetings** re-list metadata (cheap) but skip fetching bodies,
   transcripts and comments for entities already on disk.
-- Requests are capped at 4 concurrent and retry with exponential backoff on 429.
+- **files** are skipped once their key's directory exists, including when it holds only
+  the `.oversize` marker.
+- Requests are capped at 8 concurrent and retry with exponential backoff on 429. Each
+  collection bounds its own in-flight work, or one of them would own the whole queue.
 
 The TUI shows one line per collection plus a live, bun-style list of the requests
 currently on the wire. It stays on the normal screen buffer, so the final frame

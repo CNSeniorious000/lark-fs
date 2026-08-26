@@ -13,9 +13,10 @@ plain lines instead of being buried in \n escapes.
       chats/<chat_id>/
         meta.yaml
         members.yaml
-        media.yaml               # image/file keys seen in this chat; bytes are never downloaded
+        media.yaml               # image/file keys seen in this chat; the files land under files/
         messages/<YYYY-MM>/<message_id>.yaml
         threads/<thread_id>/<message_id>.yaml
+        files/<file_key>/<original name>    # only for kinds enabled in .lark-fs/config.toml
       users/<open_id>/meta.yaml
       docs/<doc_token>/{meta.yaml,content.md,comments.yaml}
       minutes/<minute_token>/{meta.yaml,transcript.txt,summary.md,chapters.yaml,todos.yaml}
