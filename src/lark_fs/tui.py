@@ -43,7 +43,9 @@ STYLE = Style.from_dict(
 def _line(row: dict, frame: str, width: int) -> str:
     mark = GLYPH[row["state"]] or f"<num>{frame}</num>"
     done, total = row["done"], row["total"]
-    count = f"{done}/{total}" if total is not None else str(done)
+    # a fraction needs a denominator worth showing: `0/0` after a ✓ reads as "did nothing"
+    # when it means "nothing left to do", and a bare 0 on a pending row looks like a result
+    count = "—" if row["state"] == "pending" else f"{done}/{total}" if total else str(done)
     head = f"{mark} <name>{row['name']:<9}</name> <num>{count:<7}</num>"
     # show what was just written; fall back to the phase note when nothing has landed yet
     tail = row["last"] if row["state"] == "running" and row["last"] else row["note"]

@@ -509,7 +509,7 @@ async def sync_wiki(store: Store, p: Progress):
         p.set("wiki", state="error", note=str(e.payload)[:60])
         return
     items = (spaces or {}).get("spaces") or []
-    p.set("wiki", total=len(items))
+    p.set("wiki", note=f"{len(items)} spaces")
 
     async def level(sid: str, parent: str | None) -> list[dict]:
         argv = ["wiki", "+node-list", "--space-id", sid, "--page-all", *(["--parent-node-token", parent] if parent else [])]
@@ -532,13 +532,16 @@ async def sync_wiki(store: Store, p: Progress):
             for nodes in await gather(*(level(sid, parent) for parent in batch)):
                 found += nodes
                 frontier += [n["node_token"] for n in nodes if n.get("has_child")]
+            # the tree's size is only known as it is walked, so report nodes against the
+            # frontier still queued -- a space count would sit at 0/1 for the whole sweep
+            p.set("wiki", done=len(found), total=len(found) + len(frontier), note=f"{len(frontier)} branches queued")
         return found
 
     async def one(space: dict):
         sid = space.get("space_id")
         store.write_yaml(f"wiki/{sid}/meta.yaml", space)
-        store.write_yaml(f"wiki/{sid}/nodes.yaml", _clean(await walk(sid)))
-        p.bump("wiki")
+        store.write_yaml(f"wiki/{sid}/nodes.yaml", _clean(nodes := await walk(sid)))
+        p.set("wiki", note=f"{len(nodes)} nodes")
 
     await gather(*(one(s) for s in items))
     p.set("wiki", state="done")
