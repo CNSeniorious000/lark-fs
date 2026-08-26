@@ -6,7 +6,7 @@ Search-backed collections (docs/minutes/meetings) have no server-side cursor, so
 they re-list metadata (cheap) but skip fetching bodies for entities already on disk.
 """
 
-from asyncio import gather, sleep
+from asyncio import create_task, gather, sleep
 from datetime import UTC, datetime, timedelta
 from html import unescape
 from pathlib import Path
@@ -36,14 +36,15 @@ class Progress:
         self.rows = reactive({})
 
     def _row(self, name: str) -> dict:
-        return self.rows.get(name) or {"name": name, "state": "pending", "done": 0, "total": None, "note": ""}
+        return self.rows.get(name) or {"name": name, "state": "pending", "done": 0, "total": None, "note": "", "last": ""}
 
     def set(self, name: str, **fields):
         self.rows[name] = {**self._row(name), **fields}
 
-    def bump(self, name: str, n: int = 1):
+    def bump(self, name: str, n: int = 1, last: str = ""):
+        """`last` is what was just written -- a title or id -- shown so the run is legible."""
         row = self._row(name)
-        self.rows[name] = {**row, "state": "running", "done": row["done"] + n}
+        self.rows[name] = {**row, "state": "running", "done": row["done"] + n, "last": last or row["last"]}
 
 
 async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, slice_hours: int = 12):
@@ -86,7 +87,8 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
                 store.write_yaml(rel, _clean(msg))
                 media += _index_media(msg)
                 _record_sender(store, msg, known_users)
-                p.bump("messages")
+                sender = (msg.get("sender") or {}).get("name") or ""
+                p.bump("messages", last=f"{msg.get('chat_name') or chat_id}  {sender}: {_oneline(msg.get('content'))}")
                 await sleep(0)  # keep the UI responsive; repaint rate is the TUI's concern
         except cli.LarkError as e:
             # keep whatever this run already committed; the next run picks up from `start`
@@ -208,8 +210,9 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 if not token or token in seen:
                     continue
                 seen.add(token)
-                store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "entity_type": r.get("entity_type"), "title": _clean(r.get("title_highlighted"))})
-                p.bump("docs")
+                title = _clean(r.get("title_highlighted"))
+                store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "entity_type": r.get("entity_type"), "title": title})
+                p.bump("docs", last=_oneline(title))
         except cli.LarkError:
             continue
 
@@ -219,7 +222,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
                 seen.add(token)
                 store.write_yaml(f"docs/{token}/meta.yaml", {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")})
-                p.bump("docs")
+                p.bump("docs", last=_oneline(node.get("title")))
 
     # bodies are the expensive part -- only fetch ones missing from disk
     todo = [t for t in seen if not store.exists(f"docs/{t}/content.md")]
@@ -241,6 +244,12 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
 
     await gather(*(body(t) for t in todo))
     p.set("docs", state="done")
+
+
+def _oneline(text, limit: int = 60) -> str:
+    """Collapse a message body to a single short line for the progress display."""
+    flat = " ".join(str(text or "").split())
+    return flat[: limit - 1] + "…" if len(flat) > limit else flat
 
 
 def _rows(payload: dict) -> list[dict]:
@@ -286,7 +295,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
     p.set("minutes", total=len(found))
     for token, item in found.items():
         store.write_yaml(f"minutes/{token}/meta.yaml", _clean(item))
-        p.bump("minutes")
+        p.bump("minutes", last=_oneline(_clean(item.get("display_info"))))
 
     todo = [t for t in found if not store.exists(f"minutes/{t}/transcript.txt")]
     p.set("minutes", note=f"{len(todo)} transcripts to fetch")
@@ -328,7 +337,7 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
                 if mid := item.get("id"):
                     ids.append(mid)
                     store.write_yaml(f"meetings/{mid}/meta.yaml", _clean(item))
-                    p.bump("meetings")
+                    p.bump("meetings", last=_oneline(_clean(item.get("display_info"))))
         except cli.LarkError as e:
             if not e.is_pagination_exhausted:
                 p.set("meetings", state="error", note=_reason(e))
@@ -436,28 +445,47 @@ ALL = ["messages", "chats", "docs", "minutes", "meetings", "bases", "wiki"]
 
 
 async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
+    """Run every collection concurrently.
+
+    Two real dependencies exist -- chats wants the chat ids messages discovered, and docs
+    mines wiki's node list for tokens that search misses -- but neither justifies blocking
+    the whole run: each dependent awaits just its producer, so the independent collections
+    make progress from the first second instead of idling behind the message sweep.
+    """
     store = Store(root)
     want = set(only or ALL)
-    chat_ids: set[str] = set()
-    if "messages" in want:
-        # runs first so chats can pick up ids from conversations `+chat-list` misses,
-        # but chats no longer depends on it succeeding -- a rate-limited message sweep
-        # must not take the roster down with it
-        chat_ids = await sync_messages(store, p) or set()
-    if "wiki" in want:
-        await sync_wiki(store, p)  # docs mines the node list for tokens search misses
-
     tasks = []
+
+    messages = create_task(sync_messages(store, p)) if "messages" in want else None
+    wiki = create_task(sync_wiki(store, p)) if "wiki" in want else None
+
+    async def chats():
+        # a rate-limited message sweep must not take the roster down with it
+        found = (await messages) or set() if messages else set()
+        await sync_chat_meta(store, p, found)
+
+    async def docs():
+        if wiki:
+            await wiki
+        await sync_docs(store, p)
+
     if "chats" in want:
-        tasks.append(sync_chat_meta(store, p, chat_ids))
+        tasks.append(chats())
     if "docs" in want:
-        tasks.append(sync_docs(store, p))
+        tasks.append(docs())
     if "minutes" in want:
         tasks.append(sync_minutes(store, p))
     if "meetings" in want:
         tasks.append(sync_meetings(store, p))
     if "bases" in want:
         tasks.append(sync_bases(store, p))
+
+    # producers are awaited by their dependents; await them here only if nobody else will
+    if messages and "chats" not in want:
+        tasks.append(messages)
+    if wiki and "docs" not in want:
+        tasks.append(wiki)
+
     await gather(*tasks)
     store.save_cursors()
     return store

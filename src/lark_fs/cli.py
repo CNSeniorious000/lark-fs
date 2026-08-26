@@ -21,11 +21,13 @@ def _label(argv: tuple[str, ...]) -> str:
     `--flag` with what follows it and take the first one that looks like an argument.
     """
     head = " ".join(argv[:2])
-    ids = (v for f, v in pairwise(argv) if f.startswith("--") and not v.startswith("--"))
-    subject = next((v for v in ids if not v.isdigit() or len(v) > 8), "")
-    return f"{head} {subject}".strip()
+    # an id-looking flag value: opaque tokens, not enum-ish options like `markdown` or `p2p,group`.
+    # Prefer the last one -- a child node token identifies the work better than its parent space.
+    ids = [v for f, v in pairwise(argv) if f.startswith("--") and RE_ID.fullmatch(v)]
+    return f"{head} {ids[-1] if ids else ''}".strip()
 
 
+RE_ID = compile(r"[A-Za-z0-9_]*[A-Z0-9][A-Za-z0-9_]{7,}")
 RE_CODE = compile(r'"code":\s*(\d+)')
 
 
@@ -132,38 +134,35 @@ async def paginate(*argv: str, key: str, page_size: int = 20, prefetch: bool = F
     two, so without this the caller does all its work in one burst and then idles --
     which reads as a frozen counter rather than steady progress.
     """
-    token = None
-    data = None
-    while True:
-        if data is None:
-            extra = ["--page-size", str(page_size), *(["--page-token", token] if token else [])]
-            try:
-                data = await run(*argv, *extra)
-            except LarkError as e:
-                if e.is_pagination_exhausted:
-                    return
-                raise
+    async def fetch(token: str | None):
+        try:
+            return await run(*argv, "--page-size", str(page_size), *(["--page-token", token] if token else []))
+        except LarkError as e:
+            if e.is_pagination_exhausted:
+                return None
+            raise
+
+    data = await fetch(None)
+    while data:
         items = data.get(key) or []
         token = data.get("page_token")
-        more = bool(token and data.get("has_more"))
+        upcoming = None
+        if token and data.get("has_more"):
+            # start the next request before handing out this page, so the caller's work
+            # overlaps the wait instead of finishing in a burst and then idling
+            upcoming = create_task(fetch(token)) if prefetch else None
+        else:
+            token = None
 
-        if prefetch and more:
-            # kick off the next request first, then hand out this page while it flies
-            extra = ["--page-size", str(page_size), "--page-token", token]
-            upcoming = create_task(run(*argv, *extra))
-            pace = 1.0 / (len(items) or 1)  # spread this page across roughly one request
-            for item in items:
-                yield item
-                await sleep(pace)
-            try:
-                data = await upcoming
-            except LarkError as e:
-                if e.is_pagination_exhausted:
-                    return
-                raise
-            continue
-
+        pace = 1.0 / (len(items) or 1) if upcoming else 0
         for item in items:
             yield item
-        if not more:
+            if pace:
+                await sleep(pace)
+
+        if upcoming:
+            data = await upcoming
+        elif token:
+            data = await fetch(token)
+        else:
             return

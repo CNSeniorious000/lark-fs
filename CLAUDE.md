@@ -61,6 +61,9 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
 - The TUI repaints from a `@effect` subscribing to a `@derived` view, with
   `refresh_interval=0` — no polling. Create that effect only after `run_async` has
   started: `Application.invalidate()` is a no-op while the app is not running.
+- A busy loop makes the process unkillable: the event loop never idles, so the SIGINT
+  handler never runs and ctrl-c does nothing. Symptom is ~90% CPU with zero `lark-cli`
+  children. Check that every `while` around a request actually advances its cursor.
 - Interruption is handled in `cli.run`, so every request is a cancellation point. Do not
   add per-loop stop checks in syncers — that approach already missed half of them.
 - Rate limits are certain, not hypothetical. Anything that walks a long range must

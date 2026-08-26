@@ -23,12 +23,15 @@ GLYPH = {"pending": "<dim>·</dim>", "running": "", "done": "<ok>✓</ok>", "err
 STYLE = Style.from_dict({"ok": "#22c55e", "err": "#ef4444", "dim": "#6b7280", "name": "bold", "num": "#eab308"})
 
 
-def _line(row: dict, frame: str) -> str:
+def _line(row: dict, frame: str, width: int) -> str:
     mark = GLYPH[row["state"]] or f"<num>{frame}</num>"
     done, total = row["done"], row["total"]
     count = f"{done}/{total}" if total is not None else str(done)
-    note = f" <dim>{row['note']}</dim>" if row["note"] else ""
-    return f"{mark} <name>{row['name']:<9}</name> <num>{count}</num>{note}"
+    head = f"{mark} <name>{row['name']:<9}</name> <num>{count:<7}</num>"
+    # show what was just written; fall back to the phase note when nothing has landed yet
+    tail = row["last"] if row["state"] == "running" and row["last"] else row["note"]
+    room = max(0, width - len(row["name"]) - len(count) - 14)
+    return head + (f" <dim>{escape(tail[:room])}</dim>" if tail else "")
 
 
 def _fetching(width: int) -> list[str]:
@@ -74,7 +77,7 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     def view():
         """Tracks progress.rows and the spinner, so the effect below knows when to redraw."""
         width = get_app().output.get_size().columns
-        lines = [_line(progress.rows[n], frame.get()) for n in rows if n in progress.rows]
+        lines = [_line(progress.rows[n], frame.get(), width) for n in rows if n in progress.rows]
         return HTML("\n".join(lines + _fetching(width)))
 
     # height must cover the collection rows plus every concurrent request line
