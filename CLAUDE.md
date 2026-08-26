@@ -132,6 +132,14 @@ not one that only shows in a transient state:
   `max_mb` is enforced after the fact and the kind whitelist is what actually bounds the
   request count. A chat embeds thousands of unnamed images (`img_*`, no filename), so
   turning on `image` is a different order of spend from `text`.
+- The tenant's host is learned from Lark's own URLs, never hardcoded -- nothing in the
+  API reports it (`auth status` gives an app id and an open id) and a baked-in one ships
+  somebody's domain to every other user. Without it, doc links degrade to plain text;
+  applink chat/person links are tenant-independent and keep working.
+- `.ignore` un-hides `lark-data/` so `rg` and `fd` can search the mirror while git still
+  refuses to commit it. Every tool that reads ignore files follows it in, so anything that
+  walks the tree needs its own exclusion -- ruff started reformatting Python inside
+  mirrored documents, and pytest collected 300k files looking for tests.
 - Count attempts, not successes. A syncer that returns early on `LarkError` without
   bumping leaves the row at 218/256 forever. Put the `p.bump` in a `finally`.
 - One row, one denominator. A collection with a discovery pass and a fetch pass must

@@ -9,6 +9,7 @@ they re-list metadata (cheap) but skip fetching bodies for entities already on d
 from asyncio import create_task, gather
 from collections.abc import MutableMapping
 from datetime import UTC, datetime, timedelta, timezone
+from itertools import islice
 from pathlib import Path
 from re import compile
 from typing import Any
@@ -44,6 +45,28 @@ def _earliest(store: Store, collection: str, since: str) -> datetime:
 
 def _months_between(start: datetime, end: datetime) -> int:
     return (end.year - start.year) * 12 + end.month - start.month + 1
+
+
+RE_TENANT = compile(r"https://[a-z0-9-]+\.(?:feishu\.cn|larksuite\.com)")
+
+
+def _note_tenant(text: str):
+    """Remember the tenant's own host the first time Lark hands one over.
+
+    Nothing in the API reports it -- `auth status` returns an app id and an open id, not a
+    host -- yet every doc, minute and base link needs it. The URLs in search results carry
+    it, so the mirror learns it from its own data instead of asking anyone to configure it.
+    """
+    if not cli.TENANT and (m := RE_TENANT.search(text or "")):
+        cli.TENANT = m[0]
+
+
+def _learn_tenant(store: Store):
+    """Recover it from disk, so a later run has links before docs are re-listed."""
+    for f in islice((store.root / "docs").glob("*/meta.yaml"), 40):
+        _note_tenant(f.read_text())
+        if cli.TENANT:
+            return
 
 
 # A chat this dense is walked in parallel windows instead of one page sequence. The width
@@ -294,6 +317,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 if not token or token in seen:
                     continue
                 title = _clean(r.get("title_highlighted"))
+                _note_tenant(meta.get("url", ""))
                 seen[token] = {**meta, "title": title}
                 store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "entity_type": r.get("entity_type"), "title": title})
                 p.bump("docs", last=cli.oneline(title))
@@ -501,6 +525,7 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = ""):
 
     todo = [i for i in ids if not store.exists(f"meetings/{i}/detail.yaml")]
     p.set("meetings", done=0, total=len(todo), note=f"fetching details · {len(ids)} meetings")
+
     async def details(batch: list[str]):
         try:
             data = await cli.run("vc", "+detail", "--meeting-ids", ",".join(batch))
@@ -616,6 +641,7 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     make progress from the first second instead of idling behind the message sweep.
     """
     store = Store(root)
+    _learn_tenant(store)
     want = set(only or ALL)
     tasks = []
 

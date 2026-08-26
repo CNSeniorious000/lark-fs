@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from html import unescape
 from itertools import count, pairwise
 from json import JSONDecoder
+from os import environ
 from re import compile
 from typing import Any
 
@@ -116,7 +117,10 @@ def unescape_entities(text: str) -> str:
     return RE_ENTITY.sub(lambda m: unescape(m[0]), text)
 
 
-TENANT = "https://acme.feishu.cn"
+# Every tenant has its own domain and nothing in the API reports it -- `auth status` gives
+# an app id and an open id, not a host. `sync` fills this in from a URL Lark has already
+# handed us; until then, set it here or in LARK_FS_TENANT (e.g. https://acme.feishu.cn).
+TENANT = environ.get("LARK_FS_TENANT", "")
 
 
 def link_for(token: str) -> str:
@@ -124,11 +128,14 @@ def link_for(token: str) -> str:
 
     Prefixes are the only signal available -- the CLI takes bare tokens and never tells us
     what kind of object they name -- but they are stable and unambiguous in practice.
+    Everything but applink needs the tenant's own domain; without it those stay plain text.
     """
     if token.startswith("oc_"):
         return f"https://applink.feishu.cn/client/chat/open?openChatId={token}"
     if token.startswith("ou_"):
         return f"https://applink.feishu.cn/client/contact/open?openId={token}"
+    if not TENANT:
+        return ""
     if token.startswith("obc"):
         return f"{TENANT}/minutes/{token}"
     if token.startswith(("tbl", "bas")):

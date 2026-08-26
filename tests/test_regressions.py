@@ -8,7 +8,7 @@ from re import findall
 from lark_fs import cli
 from lark_fs.attachments import Policy, _pending
 from lark_fs.store import Store
-from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, _windows
+from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, _note_tenant, _windows
 from lark_fs.yaml import readable_yaml_dumps
 
 
@@ -118,3 +118,29 @@ def test_an_extension_escape_hatch_beats_the_kind_lists(tmp_path):
     rows = [{"key": "file_1", "name": "dump.prompt", "chat_id": "oc_1", "message_id": "om_1"}]
     assert _pending(store, Policy({"text"}, 1), rows) == []
     assert _pending(store, Policy({"text"}, 1, [".PROMPT"]), rows) == rows
+
+
+def test_the_tenant_host_is_learned_never_hardcoded():
+    """Every install has a different one and no API reports it; a baked-in host ships
+    one tenant's domain to everybody else."""
+    before = cli.TENANT
+    try:
+        cli.TENANT = ""
+        _note_tenant("url: 'https://acme.feishu.cn/wiki/AbC123'")
+        assert cli.TENANT == "https://acme.feishu.cn"
+        _note_tenant("https://other.larksuite.com/docx/X")
+        assert cli.TENANT == "https://acme.feishu.cn", "first one wins; a later doc must not move it"
+    finally:
+        cli.TENANT = before
+
+
+def test_links_degrade_instead_of_pointing_at_the_wrong_tenant():
+    """Before the host is known, a doc link would be wrong -- so there is none. Chat and
+    person links go through applink, which is tenant-independent, and still work."""
+    before = cli.TENANT
+    try:
+        cli.TENANT = ""
+        assert cli.link_for("AbC123wiki") == ""
+        assert cli.link_for("oc_1a2b3c4d5e6f").startswith("https://applink.feishu.cn/")
+    finally:
+        cli.TENANT = before

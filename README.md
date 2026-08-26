@@ -18,8 +18,8 @@ One entity per file, named by its Lark ID, so the query interface is just `fd` a
 
 ```sh
 rg 'ou_1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d' lark-data   # every mention of a person
-fd om_x100b6d0e5c1a9f37e42b8d6c5a0f9e13               # locate one message
-rg -l 'sandbox' lark-data/minutes                        # meetings that discussed sandboxes
+fd om_x100b6d0e5c1a9f37e42b8d6c5a0f9e13              # locate one message
+rg -l 'sandbox' lark-data/minutes                    # meetings that discussed sandboxes
 ```
 
 Cross-entity references are always raw IDs, never paths — so grepping an ID finds

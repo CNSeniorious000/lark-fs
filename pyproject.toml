@@ -7,6 +7,8 @@ authors = [
     { name = "Muspi Merol", email = "me@promplate.dev" }
 ]
 requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "hmr>=0.7.6.3",
     "prompt-toolkit>=3.0.53",
@@ -23,25 +25,34 @@ build-backend = "uv_build"
 [tool.ruff]
 line-length = 200
 target-version = "py314"
+# .ignore un-hides the mirror for rg and fd, and ruff reads that same file -- without this
+# it walks into mirrored documents and reformats the code blocks inside them.
+extend-exclude = ["lark-data"]
 
 [tool.ruff.lint]
 extend-select = ["I", "N", "W", "UP", "RUF", "FURB", "C4", "ARG", "PIE", "PTH", "RSE", "SIM", "SLF", "B", "FA", "TC", "ISC", "ASYNC", "TRY"]
 ignore = ["TC003"]  # Path & friends are used at runtime here, not just in annotations
 
+[tool.pytest.ini_options]
+# without this, pytest walks the mirror looking for tests -- 300k files
+testpaths = ["tests"]
+
 [tool.pyright]
 typeCheckingMode = "standard"
+exclude = ["lark-data", ".venv"]
 venvPath = "."
 venv = ".venv"
 reportUnnecessaryTypeIgnoreComment = "error"
 
-# `m` aliases -- register with: m alias add <name> "<cmd>"
-# Kept here so the shortcuts travel with the repo.
+# `m` aliases (https://pypi.org/project/muspi-merol) -- register with:
+#     m alias -g <name> "<cmd>"
+# `m` runs from any directory, so these need an absolute path; point them at your clone.
 [tool.m.aliases]
 # sync and watch go through hmr.py so an edit lands in the running TUI; status is over
 # before an edit could, so it skips the reloader.
-sync = "uv run --project /Users/muspi-merol/Desktop/lark-fs /Users/muspi-merol/Desktop/lark-fs/hmr.py sync"
-lark-watch = "uv run --project /Users/muspi-merol/Desktop/lark-fs /Users/muspi-merol/Desktop/lark-fs/hmr.py watch"
-lark-status = "uv run --project /Users/muspi-merol/Desktop/lark-fs lark-fs status"
+sync = "uv run --project $HOME/src/lark-fs $HOME/src/lark-fs/hmr.py sync"
+lark-watch = "uv run --project $HOME/src/lark-fs $HOME/src/lark-fs/hmr.py watch"
+lark-status = "uv run --project $HOME/src/lark-fs lark-fs status"
 
 [dependency-groups]
 dev = [

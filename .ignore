@@ -1,0 +1,7 @@
+# The mirror is gitignored -- it is someone's actual Feishu data and must never be
+# committed. But being invisible to `rg` and `fd` would defeat the entire point of
+# mirroring it, and both of them honour .gitignore by default.
+#
+# This file outranks .gitignore for ripgrep and fd (and is ignored by git itself), so
+# the tree stays searchable while staying out of every commit.
+!lark-data/

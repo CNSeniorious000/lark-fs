@@ -16,9 +16,13 @@ if TYPE_CHECKING:
     from .store import Store
     from .sync import Progress
 
+# anything rg can read: source, config, logs, subtitles, structured data
+_TEXT = """bash c cfg cjs conf cpp css csv diff env go h hpp htm html ini java jenkinsfile js json jsonl jsx kt log lua
+makefile markdown md mjs ndjson patch php pl properties py r rb rs rst scss sh sql srt svg swift tex text toml ts tsv
+tsx txt vtt xml yaml yml zsh"""
+
 KINDS: dict[str, set[str]] = {
-    # anything rg can read: source, config, logs, subtitles, structured data
-    "text": {"bash", "c", "cfg", "cjs", "conf", "cpp", "css", "csv", "diff", "env", "go", "h", "hpp", "htm", "html", "ini", "java", "jenkinsfile", "js", "json", "jsonl", "jsx", "kt", "log", "lua", "makefile", "markdown", "md", "mjs", "ndjson", "patch", "php", "pl", "properties", "py", "r", "rb", "rs", "rst", "scss", "sh", "sql", "srt", "svg", "swift", "tex", "text", "toml", "ts", "tsv", "tsx", "txt", "vtt", "xml", "yaml", "yml", "zsh"},
+    "text": set(_TEXT.split()),
     "image": {"avif", "bmp", "gif", "heic", "ico", "jpeg", "jpg", "png", "tiff", "webp"},
     "video": {"avi", "mkv", "mov", "mp4", "webm"},
     "audio": {"aac", "m4a", "mp3", "opus", "wav"},
@@ -112,15 +116,10 @@ async def sync_attachments(store: Store, p: Progress):
         nonlocal kept
         key, name = row["key"], row.get("name") or ""
         dest = _dir(store, row)
+        out = dest.relative_to(store.root) / (name or key)  # relative only; the CLI creates the directories itself
+        argv = ["im", "+messages-resources-download", "--message-id", row["message_id"], "--file-key", key, "--type", "image" if key.startswith("img_") else "file", "--output", str(out)]
         try:
-            data = await cli.run(
-                "im", "+messages-resources-download",
-                "--message-id", row["message_id"], "--file-key", key,
-                "--type", "image" if key.startswith("img_") else "file",
-                # relative only, resolved against cwd; the CLI creates the directories itself
-                "--output", str(dest.relative_to(store.root) / (name or key)),
-                cwd=str(store.root), subject=f"fetch {cli.oneline(name or key, 40)}",
-            )
+            data = await cli.run(*argv, cwd=str(store.root), subject=f"fetch {cli.oneline(name or key, 40)}")
         except cli.LarkError:
             return  # transient: leave it due, the next run retries it
         finally:
