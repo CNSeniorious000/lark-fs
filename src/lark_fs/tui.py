@@ -243,6 +243,7 @@ def print_summary(store):
         "meetings": store.count("meetings/*"),
         "bases": store.count("bases/*"),
         "wiki": store.count("wiki/*"),
+        "files": store.count("chats/*/files/*/*") - store.count("chats/*/files/*/.oversize"),
     }
     width = max(len(k) for k in counts)
     print(f"  {store.root}", file=stderr)
