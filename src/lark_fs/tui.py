@@ -18,7 +18,7 @@ from reactivity import derived, effect, signal
 
 from . import cli
 from .cli import SyncAbortedError, activity, link_for
-from .sync import ALL, Progress
+from .sync import ALL, Progress, Row
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 GLYPH = {"pending": "<dim>·</dim>", "running": "", "done": "<ok>✓</ok>", "error": "<err>✗</err>"}
@@ -40,7 +40,7 @@ STYLE = Style.from_dict(
 )
 
 
-def _line(row: dict, frame: str, width: int) -> str:
+def _line(row: Row, frame: str, width: int) -> str:
     mark = GLYPH[row["state"]] or f"<num>{frame}</num>"
     done, total = row["done"], row["total"]
     # a fraction needs a denominator worth showing: `0/0` after a ✓ reads as "did nothing"
@@ -59,7 +59,7 @@ RE_TOKEN = compile(r"\b(?:oc_|ou_|obc|tbl|bas)[A-Za-z0-9_]{6,}|\b[A-Za-z0-9]{20,
 MAX_ROWS = 40  # ceiling on total height, so a huge terminal is not filled edge to edge
 
 
-def _budget(rows: list[str], progress, height: int) -> dict[str, int]:
+def _budget(rows: list[str], progress: Progress, height: int) -> dict[str, int]:
     """Hand feed lines to whoever is actually working, filling the terminal.
 
     Every in-flight request is guaranteed a line -- hiding one would misrepresent how much
@@ -173,7 +173,7 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     interrupted = False
 
     @kb.add("c-c")
-    def _(event):
+    def _stop(event):
         nonlocal interrupted
         interrupted = True
         worker.cancel()
@@ -203,8 +203,6 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
             await sleep(0.05)
             frame.set(next(SPINNER))  # also paces repaints: counters advance faster than any refresh rate
 
-    worker = None
-
     async def work():
         try:
             return await coro_factory(progress)
@@ -217,11 +215,11 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
         finally:
             painter.cancel()
 
+    worker = create_task(work())
     ticker = create_task(spin())
     painter = create_task(repaint_on_change())
-    worker = create_task(work())
     try:
-        _, result = await gather(ui(), worker, return_exceptions=True)
+        _ui, result = await gather(ui(), worker, return_exceptions=True)
     finally:
         ticker.cancel()
         painter.cancel()

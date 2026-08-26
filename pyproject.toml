@@ -30,6 +30,8 @@ ignore = ["TC003"]  # Path & friends are used at runtime here, not just in annot
 
 [tool.pyright]
 typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
 reportUnnecessaryTypeIgnoreComment = "error"
 
 # `m` aliases -- register with: m alias add <name> "<cmd>"
@@ -37,3 +39,8 @@ reportUnnecessaryTypeIgnoreComment = "error"
 [tool.m.aliases]
 sync = "uv run --project /Users/muspi-merol/Desktop/lark-fs lark-fs sync"
 lark-status = "uv run --project /Users/muspi-merol/Desktop/lark-fs lark-fs status"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
