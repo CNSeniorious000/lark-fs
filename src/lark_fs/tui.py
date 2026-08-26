@@ -22,16 +22,20 @@ from .sync import ALL, Progress
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
 GLYPH = {"pending": "<dim>·</dim>", "running": "", "done": "<ok>✓</ok>", "error": "<err>✗</err>"}
+# Brightness encodes "does this still want your attention". A sync screen is mostly
+# finished rows, so the brightest hue must belong to what is happening now -- not to the
+# ✓ pile, which is what the eye would otherwise be pulled toward. Every pair clears
+# WCAG AA (4.5:1) against dark terminal backgrounds; `muted` is the floor at 4.6:1.
 STYLE = Style.from_dict(
     {
-        "ok": "#22c55e",
-        "err": "#ef4444",
-        "dim": "#6b7280",
-        "name": "bold",
-        "num": "#eab308",
-        "live": "#3b82f6",  # in flight
-        "muted": "#6b7280",  # already settled
-        "dom": "#a1a1aa",  # feed's first column: readable, but quieter than the collection names
+        "name": "bold #e4e4e7",  # collection names: the page's structure
+        "live": "#7dd3fc",  # in flight -- the present, and the brightest thing on screen
+        "num": "#fbbf24",  # counts and spinner: the one numeric hue, so a figure is findable
+        "ok": "#4ade80",  # the ✓ glyph only; its text goes muted, because it is history
+        "err": "#ff8fa3",  # failure reads by hue break, and outranks decoration in weight
+        "dom": "#a1a1aa",  # feed column one: a label, deliberately quieter than the subject
+        "muted": "#8b8fa3",  # settled subject: legible on demand, invisible when scanning
+        "dim": "#8b8fa3",  # header note
     }
 )
 
