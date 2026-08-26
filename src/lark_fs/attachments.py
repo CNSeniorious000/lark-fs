@@ -71,12 +71,14 @@ def _dir(store: Store, row: dict) -> Path:
     return store.root / f"chats/{row['chat_id']}/files/{row['key']}"
 
 
-def _settle(dest: Path, data: dict, cap: int):
-    """Discard an attachment that turned out to be too big, and remember that it was."""
+def _settle(dest: Path, data: dict, cap: int) -> bool:
+    """Discard an attachment that turned out to be too big; True when it was kept."""
     saved = Path(data.get("saved_path") or "")
-    if data.get("size_bytes", 0) > cap and saved.is_file():
-        saved.unlink()
-        (dest / ".oversize").write_text("")  # a marker, or every run re-downloads it to find out
+    if data.get("size_bytes", 0) <= cap or not saved.is_file():
+        return True
+    saved.unlink()
+    (dest / ".oversize").write_text("")  # a marker, or every run re-downloads it to find out
+    return False
 
 
 def _pending(store: Store, policy: Policy, rows: list[dict]) -> list[dict]:
@@ -95,8 +97,10 @@ async def sync_attachments(store: Store, p: Progress):
     rows = [r for f in (store.root / "chats").glob("*/media.yaml") for r in store.read_yaml_rows(f"chats/{f.parent.name}/media.yaml")]
     todo = _pending(store, policy, rows)
     p.set("files", total=len(todo), done=0, note=f"{len(rows)} attachments indexed")
+    kept = 0
 
     async def one(row: dict):
+        nonlocal kept
         key, name = row["key"], row.get("name") or ""
         dest = _dir(store, row)
         try:
@@ -112,7 +116,8 @@ async def sync_attachments(store: Store, p: Progress):
             return  # transient: leave it due, the next run retries it
         finally:
             p.bump("files", last=cli.oneline(name or key, 48))
-        _settle(dest, data or {}, policy.max_bytes)
+        kept += _settle(dest, data or {}, policy.max_bytes)
 
     await cli.spread(one, todo)
-    p.set("files", state="done", note=f"{len(todo)} fetched, {len(rows)} indexed")
+    # attempted and kept differ whenever the size cap bites, and only the second one is on disk
+    p.set("files", state="done", note=f"{kept} kept of {len(todo)} tried, {len(rows)} indexed")
