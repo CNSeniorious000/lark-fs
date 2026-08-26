@@ -6,10 +6,18 @@ built on top of an already-logged-in [`lark-cli`](https://github.com/larksuite/c
 ## Install
 
 Needs `lark-cli` on PATH; [uv](https://docs.astral.sh/uv/) brings its own Python 3.14, so
-there is nothing else to set up. To just run it:
+there is nothing else to set up. To run it once:
 
 ```sh
 uvx --from git+https://github.com/CNSeniorious000/lark-fs lark-fs sync
+```
+
+To keep it — this puts `lark-fs` on your PATH, and `uv tool upgrade lark-fs` pulls later
+commits:
+
+```sh
+uv tool install git+https://github.com/CNSeniorious000/lark-fs
+lark-fs sync
 ```
 
 To hack on it — the syncers are where the Lark-specific knowledge lives, and you will
