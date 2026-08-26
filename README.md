@@ -3,14 +3,53 @@
 Mirror everything reachable in Feishu/Lark onto disk as a **greppable, ID-addressed file tree**,
 built on top of an already-logged-in [`lark-cli`](https://github.com/larksuite/cli).
 
+## Install
+
+Needs `lark-cli` on PATH; [uv](https://docs.astral.sh/uv/) brings its own Python 3.14, so
+there is nothing else to set up. To just run it:
+
 ```sh
-m sync                      # incremental sync of everything
-m sync --only messages docs # just these collections
-m sync --only files         # fetch attachments for what is already indexed
-m lark-status               # counts per collection, no network
-m lark-watch                # poll for changes until interrupted
-lark-fs reindex             # rebuild users/ and media.yaml from messages on disk, no network
+uvx --from git+https://github.com/CNSeniorious000/lark-fs lark-fs sync
 ```
+
+To hack on it — the syncers are where the Lark-specific knowledge lives, and you will
+want to edit them:
+
+```sh
+git clone https://github.com/CNSeniorious000/lark-fs && cd lark-fs
+uv run lark-fs sync
+uv run hmr.py sync   # same thing, but edits to src/ land in the running TUI
+```
+
+## Authorize
+
+`lark-cli` holds the credentials; this only drives it. A plain `lark-cli auth login` is
+enough to start, and two extra scopes are worth asking for:
+
+```sh
+lark-cli auth login --scope "im:chat:read im:chat.members:read"
+```
+
+Both are optional — messages come from the global search endpoint, so a sync works
+without them; they add chat listing (including quiet chats the message sweep never sees)
+and the member roster that populates `users/`.
+
+## Usage
+
+```sh
+lark-fs sync                      # incremental sync of everything -- also the default command
+lark-fs sync --only messages docs # just these collections
+lark-fs sync --only files         # fetch attachments for whatever is already indexed
+lark-fs status                    # counts per collection, no network
+lark-fs watch                     # poll for changes until interrupted
+lark-fs reindex                   # rebuild users/ and media.yaml from messages on disk, no network
+```
+
+The store defaults to `./lark-data`. Override with `--root` or `LARK_FS_ROOT` — the
+latter is the way to keep one store while running from anywhere.
+
+Every command is resumable: cursors are committed as the sweep advances, so an
+interrupted run picks up where it stopped rather than starting over.
 
 ## Why a file tree
 
@@ -98,17 +137,18 @@ be rebuilt locally when the extraction rules change — no API calls, no rate li
 lark-fs reindex --root lark-data
 ```
 
-## Setup
+## Developing
 
-Needs `lark-cli` on PATH and authorized with:
+`uv run hmr.py <command>` runs any command under hot reload, so an edit to a syncer lands
+in the TUI already on screen instead of costing you the sweep in flight. State is on
+disk, so the restarted run resumes from the cursors.
 
 ```sh
-lark-cli auth login --scope "im:chat:read im:chat.members:read"
+uv run ruff check . && uv run ruff format .
+uv run pytest          # regressions for the failures that were silent
+pyright
 ```
 
-Both are optional — messages come from the global search endpoint, so a sync still works
-without them; they add chat listing (including quiet chats the message sweep never sees)
-and the member roster that populates `users/`.
-
-The store defaults to `./lark-data`. Override with `--root` or `LARK_FS_ROOT` — the
-latter is the way to keep one store while running from anywhere.
+`CLAUDE.md` is the field guide: `lark-cli`'s per-endpoint pagination caps, which
+freshness signal each entity actually has, and the invariants that keep a partial sweep
+from overwriting good data. Read it before touching `sync.py`.
