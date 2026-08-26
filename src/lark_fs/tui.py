@@ -159,7 +159,9 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
             lines += _feed(n, budget.get(n, 0), width) if budget.get(n) else []
         nonlocal peak
         # holding the peak keeps a shrinking frame from leaving stale rows behind, but that
-        # padding would otherwise be frozen into scrollback as a gap the height of the feed
+        # padding would otherwise be frozen into scrollback as a gap the height of the feed.
+        # It is a plain local rather than `painted.get()`: this is a derived, and reading the
+        # signal it writes would make it depend on itself and re-run forever.
         peak = len(lines) if settling.get() else max(peak, len(lines))
         painted.set(peak)
         lines += [[]] * (peak - len(lines))

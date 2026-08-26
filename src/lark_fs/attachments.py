@@ -121,7 +121,7 @@ async def sync_attachments(store: Store, p: Progress):
     """Download every attachment the policy admits, from the media index already on disk."""
     p.set("files", state="running")
     policy = policy_for(store)
-    rows = [r for f in (store.root / "chats").glob("*/media.yaml") for r in store.read_yaml_rows(f"chats/{f.parent.name}/media.yaml")]
+    rows = store.glob_rows("chats/*/media.yaml")
     todo = _pending(store, policy, rows)
     p.set("files", total=len(todo), done=0, note=f"{len(rows)} attachments indexed")
     kept = 0

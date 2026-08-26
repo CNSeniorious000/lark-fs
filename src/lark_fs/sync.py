@@ -319,12 +319,7 @@ def _wiki_aliases(store: Store) -> dict[str, str]:
     Translating also merges those hits with the copies the wiki walk found, instead of
     mirroring the same document under two names.
     """
-    return {
-        n["node_token"]: n["obj_token"]
-        for f in (store.root / "wiki").glob("*/nodes.yaml")
-        for n in store.read_yaml_rows(f"wiki/{f.parent.name}/nodes.yaml")
-        if n.get("node_token") and n.get("obj_token")
-    }
+    return {n["node_token"]: n["obj_token"] for n in store.glob_rows("wiki/*/nodes.yaml") if n.get("node_token") and n.get("obj_token")}
 
 
 async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None):
@@ -351,15 +346,14 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             continue
 
     # wiki nodes point at real documents and are enumerated exhaustively, unlike search
-    for space in (store.root / "wiki").glob("*/nodes.yaml"):
-        for node in store.read_yaml_rows(f"wiki/{space.parent.name}/nodes.yaml"):
-            if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
-                seen[token] = {"title": node.get("title", "")}
-                store.write_yaml(
-                    f"docs/{token}/meta.yaml",
-                    {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")},
-                )
-                p.bump("docs", last=cli.oneline(node.get("title")))
+    for node in store.glob_rows("wiki/*/nodes.yaml"):
+        if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
+            seen[token] = {"title": node.get("title", "")}
+            store.write_yaml(
+                f"docs/{token}/meta.yaml",
+                {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")},
+            )
+            p.bump("docs", last=cli.oneline(node.get("title")))
 
     # bodies are the expensive part: fetch one only if we have none, or if the server's
     # update_time moved past the copy we already wrote. A doc can be edited at any time,

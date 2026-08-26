@@ -65,24 +65,17 @@ class Store:
             f.write(readable_yaml_dumps(rows))
 
     def read_yaml_rows(self, rel: str) -> list[dict]:
-        """Read back a YAML sequence this store wrote. Only handles the flat `- key: value`
-        shape used by the media index -- enough to merge across runs without a YAML parser."""
+        """Read back a YAML sequence this store wrote."""
         path = self.root / rel
-        if not path.exists():
-            return []
-        rows: list[dict] = []
-        for line in path.read_text().splitlines():
-            if line.startswith("- "):
-                rows.append({})
-                line = line[2:]
-            elif line.startswith("  "):
-                line = line[2:]
-            else:
-                continue
-            key, _, value = line.partition(": ")
-            if rows and key:
-                rows[-1][key] = value.strip().strip("'")
-        return rows
+        return _rows(path.read_text()) if path.exists() else []
+
+    def glob_rows(self, pattern: str) -> list[dict]:
+        """Every row of every sequence matching `pattern`, merged.
+
+        Node lists and media indexes are one file per space or chat, and every reader of
+        them wants the union -- which each row already carries enough ids to attribute.
+        """
+        return [row for f in self.root.glob(pattern) for row in _rows(f.read_text())]
 
     def read_yaml(self, rel: str) -> dict:
         """Load back a mapping this store wrote. Returns {} when absent or unparseable."""
@@ -99,3 +92,22 @@ class Store:
 
     def count(self, pattern: str) -> int:
         return sum(1 for _ in self.root.glob(pattern))
+
+
+def _rows(text: str) -> list[dict]:
+    """Parse the flat `- key: value` shape the sequence writers emit -- enough to merge
+    across runs without a YAML parser, which on a 40k-row media index is the difference
+    between milliseconds and seconds."""
+    rows: list[dict] = []
+    for line in text.splitlines():
+        if line.startswith("- "):
+            rows.append({})
+            line = line[2:]
+        elif line.startswith("  "):
+            line = line[2:]
+        else:
+            continue
+        key, _, value = line.partition(": ")
+        if rows and key:
+            rows[-1][key] = value.strip().strip("'")
+    return rows
