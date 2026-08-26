@@ -58,8 +58,10 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
   the next request first and spreads the current page across its flight time, so counters
   advance steadily. Measure repaints by counting PTY writes — matching whole lines misses
   partial redraws and makes a live UI look dead.
-- The request feed pins in-flight rows to the bottom and lets finished ones drift up, so
-  a row never jumps position at the moment it completes. `cli.activity` owns that state.
+- The request feed is grouped per collection and shares a fixed line budget: only running
+  collections get feed lines, so the layout never outgrows the screen. `cli.activity` owns
+  that state, keyed by the `cli.current_group` ContextVar each syncer sets on entry.
+  In-flight rows stay pinned below finished ones, so a row never jumps as it completes.
 - The TUI repaints from a `@effect` subscribing to a `@derived` view, with
   `refresh_interval=0` — no polling. Create that effect only after `run_async` has
   started: `Application.invalidate()` is a no-op while the app is not running.

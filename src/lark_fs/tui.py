@@ -15,7 +15,7 @@ from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.styles import Style
 from reactivity import derived, effect, signal
 
-from .cli import FEED_LIMIT, SyncAbortedError, activity
+from .cli import SyncAbortedError, activity
 from .sync import ALL, Progress
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
@@ -44,22 +44,33 @@ def _line(row: dict, frame: str, width: int) -> str:
 
 
 FEED_MARK = {"running": ("<live>→</live>", "live"), "done": ("<ok>✓</ok>", "muted"), "error": ("<err>✗</err>", "muted")}
+FEED_BUDGET = 12  # total feed lines shared across collections
 
 
-def _feed(width: int) -> list[str]:
-    """Recent requests, oldest first: finished ones drift up, in-flight stay at the bottom.
+def _budget(rows: list[str], progress) -> dict[str, int]:
+    """Hand feed lines to whoever is actually working.
 
-    Two aligned columns -- domain, then subject -- so the eye can scan either one.
+    A finished or idle collection collapses to its own summary line; the rest split the
+    budget, with anything in flight guaranteed at least one line so it never looks stuck.
     """
-    rows = activity.rows()
-    if not rows:
+    active = [n for n in rows if progress.rows.get(n, {}).get("state") == "running"]
+    if not active:
+        return {}
+    share, extra = divmod(FEED_BUDGET, len(active))
+    return {n: max(1, share + (1 if i < extra else 0)) for i, n in enumerate(active)}
+
+
+def _feed(group: str, limit: int, width: int) -> list[str]:
+    """One collection's recent requests, oldest first: finished drift up, in-flight pinned below."""
+    entries = activity.rows(group, limit)
+    if not entries:
         return []
-    col = max(len(domain) for domain, _, _ in rows)
-    room = max(8, width - col - 6)
+    col = max(len(domain) for domain, _, _ in entries)
+    room = max(8, width - col - 8)
     lines = []
-    for domain, subject, state in rows:
+    for domain, subject, state in entries:
         mark, tone = FEED_MARK[state]
-        lines.append(f"  {mark} <dom>{domain:<{col}}</dom> <{tone}>{escape(subject[:room])}</{tone}>")
+        lines.append(f"    {mark} <dom>{domain:<{col}}</dom> <{tone}>{escape(subject[:room])}</{tone}>")
     return lines
 
 
@@ -100,11 +111,17 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     def view():
         """Tracks progress.rows and the spinner, so the effect below knows when to redraw."""
         width = get_app().output.get_size().columns
-        lines = [_line(progress.rows[n], frame.get(), width) for n in rows if n in progress.rows]
-        return HTML("\n".join(lines + _feed(width)))
+        budget = _budget(rows, progress)
+        lines = []
+        for n in rows:
+            if n not in progress.rows:
+                continue
+            lines.append(_line(progress.rows[n], frame.get(), width))
+            lines += _feed(n, budget.get(n, 0), width) if budget.get(n) else []
+        return HTML("\n".join(lines))
 
     # height must cover the collection rows plus every concurrent request line
-    body = Window(FormattedTextControl(view), height=len(rows) + FEED_LIMIT, dont_extend_height=True, always_hide_cursor=True)
+    body = Window(FormattedTextControl(view), height=len(rows) + FEED_BUDGET, dont_extend_height=True, always_hide_cursor=True)
     kb = KeyBindings()
     interrupted = False
 

@@ -61,6 +61,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
     slices and commit the cursor after each one: an interrupted run resumes where it
     stopped instead of discarding everything it already wrote.
     """
+    cli.current_group.set("messages")
     p.set("messages", state="running")
     cursor = store.cursors.get("messages")
     start = datetime.fromisoformat(cursor) if cursor else datetime.now(UTC) - timedelta(days=window_days)
@@ -143,6 +144,7 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
     `+chat-list` covers chats that have said nothing in the synced window, so it finds
     more than the message sweep does; ids seen in messages are unioned in on top.
     """
+    cli.current_group.set("chats")
     p.set("chats", state="running")
     listed: dict[str, dict] = {}
     try:
@@ -200,6 +202,7 @@ DOC_QUERIES = ["", "a", "e", "的", "会议", "设计", "项目", "需求", "方
 
 async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None):
     """Cloud docs discovered via search and via wiki nodes, exported to markdown, plus comments."""
+    cli.current_group.set("docs")
     p.set("docs", state="running")
     seen: dict[str, dict] = {}
     for q in queries or DOC_QUERIES:
@@ -287,6 +290,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
     `+search` caps at 50 results per query no matter the filters, so a single call over
     the whole history silently reports 50. Walking month by month lifts the ceiling.
     """
+    cli.current_group.set("minutes")
     p.set("minutes", state="running")
     found: dict[str, dict] = {}
     month = datetime.fromisoformat(since).replace(tzinfo=UTC)
@@ -337,6 +341,7 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
 
     Like minutes, `+search` has a per-query ceiling (150 here), so walk month by month.
     """
+    cli.current_group.set("meetings")
     p.set("meetings", state="running")
     ids: list[str] = []
     month = datetime.fromisoformat(since).replace(tzinfo=UTC)
@@ -369,6 +374,7 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
 
 async def sync_bases(store: Store, p: Progress):
     """Bitables reachable from drive search; one JSONL of records per table."""
+    cli.current_group.set("bases")
     p.set("bases", state="running")
     tokens: set[str] = set()
     try:
@@ -410,6 +416,7 @@ async def sync_bases(store: Store, p: Progress):
 
 
 async def sync_wiki(store: Store, p: Progress):
+    cli.current_group.set("wiki")
     p.set("wiki", state="running")
     try:
         spaces = await cli.run("wiki", "+space-list", "--page-all")
