@@ -5,7 +5,11 @@ Mirrors Feishu/Lark onto disk as a greppable, ID-addressed file tree, driving th
 
 ## Working on this
 
-- `uvx ruff check . && uvx ruff format .` before committing. Config is strict on purpose.
+- `uvx ruff check . && uvx ruff format .` and `uvx pyright` before committing. Both are
+  configured strictly on purpose, and pyright reads the project venv via `pyproject.toml`.
+- `uv run pytest tests` covers the failures that were silent. When adding one, revert the
+  fix and watch it go red — a test that never failed proves nothing. Twice now a
+  string-replace edit matched nothing and quietly "verified" an unchanged file.
 - `m sync --only <collection>` to exercise one syncer against live data.
 - Test against real Feishu data, never mocks — every bug found here so far was a
   wrong field name or an undocumented pagination cap that a mock would have hidden.
@@ -111,6 +115,17 @@ not one that only shows in a transient state:
 - A busy loop makes the process unkillable: the event loop never idles, so the SIGINT
   handler never runs and ctrl-c does nothing. Symptom is ~90% CPU with zero `lark-cli`
   children. Check that every `while` around a request actually advances its cursor.
+- Fan out with `cli.spread`, never a bare `gather` over a whole backlog. The global
+  semaphore hands out slots FIFO, so thousands of queued waiters from one collection sit
+  ahead of every other row and freeze it completely — `docs` held all 8 slots while
+  `messages` and `meetings` showed no in-flight requests at all. Bounding in-flight work
+  costs no throughput; the semaphore was always the ceiling. Diagnose it with
+  `pgrep -P <pid>`: if every child is the same subcommand, that is starvation, not a hang.
+- Count attempts, not successes. A syncer that returns early on `LarkError` without
+  bumping leaves the row at 218/256 forever. Put the `p.bump` in a `finally`.
+- One row, one denominator. A collection with a discovery pass and a fetch pass must
+  reset `done` and re-set `total` when it moves on, or the fraction reads 3877/3877 while
+  the requests visibly scrolling below it belong to a phase that is not being counted.
 - Interruption is handled in `cli.run`, so every request is a cancellation point. Do not
   add per-loop stop checks in syncers — that approach already missed half of them.
 - Two different ceilings exist and only one is survivable. 99991400 is per-second/minute
