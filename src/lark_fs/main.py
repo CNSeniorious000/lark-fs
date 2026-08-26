@@ -18,8 +18,7 @@ from .tui import print_summary, run_with_tui
 def build_parser():
     p = ArgumentParser(prog="lark-fs", description="Mirror Feishu/Lark into a greppable file tree.")
     p.add_argument("command", choices=["sync", "status", "reindex", "watch"], nargs="?", default="sync")
-    # a fixed default keeps one store instead of scattering `lark-data/` wherever it was run
-    default_root = Path(environ.get("LARK_FS_ROOT") or Path.home() / "lark-data")
+    default_root = Path(environ.get("LARK_FS_ROOT") or "lark-data")
     p.add_argument("--root", type=Path, default=default_root, help=f"destination directory (default: {default_root})")
     p.add_argument("--only", nargs="+", choices=ALL, help="sync only these collections")
     p.add_argument("--interval", type=float, default=120, help="watch: seconds between message sweeps")

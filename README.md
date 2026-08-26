@@ -82,6 +82,5 @@ Both are optional — messages come from the global search endpoint, so a sync s
 without them; they add chat listing (including quiet chats the message sweep never sees)
 and the member roster that populates `users/`.
 
-The store defaults to `~/lark-data` rather than `./lark-data`, so running from different
-directories keeps one store instead of scattering copies. Override with `--root` or
-`LARK_FS_ROOT`.
+The store defaults to `./lark-data`. Override with `--root` or `LARK_FS_ROOT` — the
+latter is the way to keep one store while running from anywhere.
