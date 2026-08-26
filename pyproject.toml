@@ -44,15 +44,15 @@ venvPath = "."
 venv = ".venv"
 reportUnnecessaryTypeIgnoreComment = "error"
 
-# `m` aliases (https://pypi.org/project/muspi-merol) -- register with:
-#     m alias -g <name> "<cmd>"
-# `m` runs from any directory, so these need an absolute path; point them at your clone.
+# `m` aliases (https://pypi.org/project/muspi-merol), read straight from this file.
+# Relative on purpose: the store defaults to ./lark-data, so these are meant to run from
+# the clone anyway, and a path here would be one machine's layout baked into the repo.
 [tool.m.aliases]
 # sync and watch go through hmr.py so an edit lands in the running TUI; status is over
 # before an edit could, so it skips the reloader.
-sync = "uv run --project $HOME/src/lark-fs $HOME/src/lark-fs/hmr.py sync"
-lark-watch = "uv run --project $HOME/src/lark-fs $HOME/src/lark-fs/hmr.py watch"
-lark-status = "uv run --project $HOME/src/lark-fs lark-fs status"
+sync = "uv run hmr.py sync"
+lark-watch = "uv run hmr.py watch"
+lark-status = "uv run lark-fs status"
 
 [dependency-groups]
 dev = [
