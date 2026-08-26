@@ -73,7 +73,7 @@ def _summarise(payload) -> str:
     for key in LIST_KEYS:
         if isinstance(items := data.get(key), list):
             if not items:
-                return "empty"  # an empty window is a result too; saying so beats echoing the query
+                return "nothing"  # an empty window is a result too; saying so beats echoing the query
             head = _title(items[0])
             label = "" if key == "items" else f" {key}"
             return f"{len(items)}{label}" + (f" · {head}" if head else "")

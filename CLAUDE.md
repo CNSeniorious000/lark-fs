@@ -55,6 +55,10 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
 
 ## Invariants
 
+- Do not scan from a fixed start date. `_earliest` reads where the store's own data
+  begins — a workspace whose history starts this year was otherwise spending 85% of its
+  requests on empty months, every sync.
+
 - One entity per file, named by its Lark ID. Cross-references are raw IDs, never paths.
 - Structured data is YAML via `yaml.py` (literal blocks for multi-line text) so message
   bodies stay greppable as plain lines. Never write JSON for entity data.

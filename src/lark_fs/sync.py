@@ -20,6 +20,25 @@ from .store import Store
 TZ = "+08:00"
 
 
+FIRST_MONTH = "2023-01-01"  # only used the first time, before the store can answer
+
+
+def _earliest(store: Store, collection: str, since: str) -> datetime:
+    """Where the month walk should start.
+
+    Scanning from a fixed year re-queries every empty month before the account had any
+    data -- for a workspace that started this year that is most of the requests. Once
+    anything is on disk it says where history actually begins; back up one month so an
+    entry that lands late still gets picked up.
+    """
+    if since:
+        return datetime.fromisoformat(since).replace(tzinfo=UTC)
+    months = [m[1].replace(".", "-") for f in (store.root / collection).glob("*/*.yaml") if (m := RE_START.search(f.read_text()))]
+    if not months:
+        return datetime.fromisoformat(FIRST_MONTH).replace(tzinfo=UTC)
+    return (datetime.fromisoformat(f"{min(months)}-01").replace(tzinfo=UTC) - timedelta(days=1)).replace(day=1)
+
+
 def _months_between(start: datetime, end: datetime) -> int:
     return (end.year - start.year) * 12 + end.month - start.month + 1
 
@@ -121,6 +140,7 @@ def _reason(e: cli.LarkError) -> str:
 
 # media keys are embedded in the message body, not a separate field:
 #   `[Image: img_v3_...]`  `![Image](img_v3_...)`  `<file key="file_v3_..." name="..."/>`
+RE_START = compile(r"(?:start_time|开始时间):\s*'?(20\d{2}[-.]\d{2})")  # anchor on the label; bare digits also match durations and ids
 RE_MEDIA = compile(r'(?:\[(?:Image|Media|File|Video|Audio):\s*([a-z]+_v\d+_[\w-]+)\]|!\[[^\]]*\]\(([a-z]+_v\d+_[\w-]+)\)|<\w+\s+key="([^"]+)"(?:\s+name="([^"]*)")?)')
 
 
@@ -345,7 +365,7 @@ def _clean(value):
     return value
 
 
-async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
+async def sync_minutes(store: Store, p: Progress, *, since: str = ""):
     """Minutes (妙记): metadata, AI summary, chapters, todos, and full transcript.
 
     `+search` caps at 50 results per query no matter the filters, so a single call over
@@ -353,7 +373,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
     """
     p.set("minutes", state="running")
     found: dict[str, dict] = {}
-    month = datetime.fromisoformat(since).replace(tzinfo=UTC)
+    month = _earliest(store, "minutes", since)
     now = datetime.now(UTC)
     p.set("minutes", total=_months_between(month, now))
     scanned = 0
@@ -399,14 +419,14 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
     p.set("minutes", state="done", note=f"{len(found)} minutes")
 
 
-async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01"):
+async def sync_meetings(store: Store, p: Progress, *, since: str = ""):
     """VC meeting records; links each meeting to its minute_token and note_id.
 
     Like minutes, `+search` has a per-query ceiling (150 here), so walk month by month.
     """
     p.set("meetings", state="running")
     ids: list[str] = []
-    month = datetime.fromisoformat(since).replace(tzinfo=UTC)
+    month = _earliest(store, "meetings", since)
     now = datetime.now(UTC)
     p.set("meetings", total=_months_between(month, now))
     scanned = 0
