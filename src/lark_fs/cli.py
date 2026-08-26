@@ -1,7 +1,8 @@
 """Thin async wrapper around the `lark-cli` binary."""
 
-from asyncio import CancelledError, Semaphore, create_subprocess_exec, create_task, shield, sleep, subprocess
+from asyncio import CancelledError, Semaphore, create_subprocess_exec, create_task, gather, shield, sleep, subprocess
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable, Collection
 from contextlib import suppress
 from contextvars import ContextVar
 from html import unescape
@@ -130,7 +131,7 @@ def link_for(token: str) -> str:
         return f"https://applink.feishu.cn/client/contact/open?openId={token}"
     if token.startswith("obc"):
         return f"{TENANT}/minutes/{token}"
-    if token.startswith("tbl") or token.startswith("bas"):
+    if token.startswith(("tbl", "bas")):
         return f"{TENANT}/base/{token}"
     if token.isdigit():
         return f"{TENANT}/wiki/settings/{token}" if len(token) > 15 else ""
@@ -145,13 +146,13 @@ def _label(argv: tuple[str, ...]) -> tuple[str, str]:
     like `markdown` or `p2p,group` -- preferring the last, since a child node token
     identifies the work better than the parent space it lives under.
     """
-    verb = argv[1].lstrip("+") if len(argv) > 1 else ""
-    flags = dict(pairwise(argv))
+    domain, *rest = argv
+    verb = rest[0].lstrip("+") if rest else ""
     # a time-windowed sweep is better identified by its window than by any token in it
-    if start := flags.get("--start"):
-        return argv[0], f"{verb} {start[:10]}"
+    if start := dict(pairwise(argv)).get("--start"):
+        return domain, f"{verb} {start[:10]}"
     ids = [v for f, v in pairwise(argv) if f.startswith("--") and RE_ID.fullmatch(v)]
-    return argv[0], f"{verb} {ids[-1]}".strip() if ids else verb
+    return domain, f"{verb} {ids[-1]}".strip() if ids else verb
 
 
 RE_ID = compile(r"(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{8,}")
@@ -256,18 +257,19 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None, subject: str
             payload = None
             try:
                 proc = await create_subprocess_exec(*args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
-                out, stderr = await proc.communicate()
+                try:
+                    out, stderr = await proc.communicate()
+                except CancelledError:
+                    # ctrl-c: kill the child and *wait for it*. Without the wait, asyncio reaps the
+                    # subprocess transport after the loop has closed and complains "Loop ... is closed".
+                    with suppress(ProcessLookupError):
+                        proc.kill()
+                        with suppress(CancelledError):
+                            await shield(proc.wait())
+                    raise
                 failed = False
                 payload = _parse(out.decode(errors="replace"))
                 outcome = "" if subject else (_summarise(payload) if feed_enabled else "")
-            except CancelledError:
-                # ctrl-c: kill the child and *wait for it*. Without the wait, asyncio reaps the
-                # subprocess transport after the loop has closed and complains "Loop ... is closed".
-                with suppress(ProcessLookupError, UnboundLocalError):
-                    proc.kill()
-                    with suppress(CancelledError):
-                        await shield(proc.wait())
-                raise
             finally:
                 if feed_enabled:
                     activity.finish(rid, "error" if failed else "done", outcome)
@@ -335,3 +337,20 @@ async def paginate(*argv: str, key: str, page_size: int = 50, prefetch: bool = F
             data = await fetch(token)
         else:
             return
+
+
+async def spread[T](work: Callable[[T], Awaitable[object]], items: Collection[T], width: int = CONCURRENCY):
+    """Run `work` over every item, keeping at most `width` calls in flight.
+
+    Handing the whole backlog to `gather` instead parks thousands of waiters on the shared
+    semaphore, and that queue is FIFO: every other collection then sits behind them, dead
+    still, until this one drains. Bounding the queue costs no throughput -- the semaphore
+    was always the real ceiling -- it only stops one collection from owning all of it.
+    """
+    todo = iter(items)
+
+    async def worker():
+        for item in todo:  # one shared iterator: whoever finishes first takes the next item
+            await work(item)
+
+    await gather(*(worker() for _ in range(min(width, len(items)))))

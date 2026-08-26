@@ -7,9 +7,11 @@ they re-list metadata (cheap) but skip fetching bodies for entities already on d
 """
 
 from asyncio import create_task, gather
+from collections.abc import MutableMapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from re import compile
+from typing import Any
 
 from reactivity import reactive
 
@@ -47,6 +49,9 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S") + TZ
 
 
+type Row = dict[str, Any]
+
+
 class Progress:
     """Sync state as a reactive store; readers re-run automatically when a row changes.
 
@@ -55,9 +60,9 @@ class Progress:
     """
 
     def __init__(self):
-        self.rows = reactive({})
+        self.rows: MutableMapping[str, Row] = reactive({})
 
-    def _row(self, name: str) -> dict:
+    def _row(self, name: str) -> Row:
         return self.rows.get(name) or {"name": name, "state": "pending", "done": 0, "total": None, "note": "", "last": ""}
 
     def set(self, name: str, **fields):
@@ -80,7 +85,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
     walking each one is both complete and cheaper to resume, because a per-chat cursor
     means an interrupted run only re-reads the chat it stopped in.
     """
-    known = chat_ids or await _list_chats(store, p)
+    known = chat_ids or await _list_chats(store)
     cursors: dict[str, str] = store.cursors.setdefault("chats", {})
     p.set("messages", state="running", total=len(known), done=0, note=f"{len(known)} chats")
     media: list[dict] = []
@@ -115,15 +120,13 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
             store.save_cursors()
         p.bump("messages")
 
-    for group in [sorted(known)[i : i + cli.CONCURRENCY] for i in range(0, len(known), cli.CONCURRENCY)]:
-        Aborted.check()
-        await gather(*(one(c) for c in group))
+    await cli.spread(one, sorted(known))
     _flush_media(store, media)
     p.set("messages", state="done", note=f"{total} messages across {len(known)} chats")
     return known
 
 
-async def _list_chats(store: Store, p: Progress) -> set[str]:
+async def _list_chats(store: Store) -> set[str]:
     """Every chat the user belongs to. Falls back to whatever is already mirrored."""
     found: set[str] = set()
     try:
@@ -200,9 +203,7 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
                 store.write_yaml(f"users/{oid}/meta.yaml", _clean({"open_id": oid, **u}))
         p.bump("chats", last=f"{len(people)} members")
 
-    for batch in [todo[i : i + cli.CONCURRENCY] for i in range(0, len(todo), cli.CONCURRENCY)]:
-        Aborted.check()
-        await gather(*(one(c) for c in batch))
+    await cli.spread(one, todo)
     p.set("chats", state="done", note=f"{len(known)} chats")
 
 
@@ -257,13 +258,16 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # update_time moved past the copy we already wrote. A doc can be edited at any time,
     # so there is no window to bound this -- the timestamp is the only reliable signal.
     todo = [t for t, meta in seen.items() if _doc_is_stale(store, t, meta)]
-    p.set("docs", total=len(seen), note=f"{len(todo)} bodies to fetch")
+    p.set("docs", done=0, total=len(todo), note=f"{len(seen)} docs")
 
     async def body(token: str):
+        title = cli.oneline(seen[token].get("title") or token, 48)
         try:
-            data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {cli.oneline(seen[token].get('title') or token, 48)}")
+            data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {title}")
         except cli.LarkError:
             return  # transient: leave it due, the next run retries it
+        finally:
+            p.bump("docs", last=title)  # count attempts, not successes, or the fraction never reaches its end
         # sheets, bitables and the like answer fine but carry no markdown body; record that,
         # or every run retries the same few hundred tokens forever
         content = ((data or {}).get("document") or {}).get("content")
@@ -275,8 +279,8 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         except cli.LarkError:
             pass
 
-    await gather(*(body(t) for t in todo))
-    p.set("docs", state="done")
+    await cli.spread(body, todo)
+    p.set("docs", state="done", note=f"{len(seen)} docs")
 
 
 def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
@@ -345,7 +349,7 @@ def _rows(payload: dict) -> list[dict]:
     return [{"record_id": rid, **dict(zip(fields, row, strict=False))} for rid, row in zip(ids, data, strict=False)]
 
 
-def _clean(value):
+def _clean(value) -> Any:
     """Lark's search endpoints return HTML-entity-escaped text with <h> hit markers.
     Left as-is those become `&lt;b&gt;` on disk, which breaks plain-text grep."""
     if isinstance(value, str):
@@ -396,7 +400,8 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = ""):
             data = await cli.run("minutes", "+detail", "--minute-tokens", token, "--transcript", "--summary", "--todo", "--chapter", "--keyword", cwd=str(store.root))
         except cli.LarkError:
             return
-        p.bump("minutes", last=cli.summarise_title((found.get(token) or {}).get("display_info")))
+        finally:
+            p.bump("minutes", last=cli.summarise_title((found.get(token) or {}).get("display_info")))
         for m in (data or {}).get("minutes") or []:
             arts = m.get("artifacts") or {}
             store.write_yaml(f"minutes/{token}/detail.yaml", _clean({k: v for k, v in m.items() if k != "artifacts"}))
@@ -407,7 +412,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = ""):
             if summary := arts.get("summary"):
                 store.write(f"minutes/{token}/summary.md", summary if isinstance(summary, str) else str(summary))
 
-    await gather(*(detail(t) for t in todo))
+    await cli.spread(detail, todo)
     p.set("minutes", state="done", note=f"{len(found)} minutes")
 
 
@@ -439,15 +444,17 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = ""):
 
     todo = [i for i in ids if not store.exists(f"meetings/{i}/detail.yaml")]
     p.set("meetings", done=0, total=len(todo), note=f"fetching details · {len(ids)} meetings")
-    for batch in [todo[i : i + 20] for i in range(0, len(todo), 20)]:
-        Aborted.check()
+    async def details(batch: list[str]):
         try:
             data = await cli.run("vc", "+detail", "--meeting-ids", ",".join(batch))
         except cli.LarkError:
-            continue
+            return
+        finally:
+            p.bump("meetings", len(batch))
         for m in (data or {}).get("meetings") or []:
             store.write_yaml(f"meetings/{m['meeting_id']}/detail.yaml", _clean(m))
-        p.bump("meetings", len(batch))
+
+    await cli.spread(details, [todo[i : i + 20] for i in range(0, len(todo), 20)])
     p.set("meetings", state="done", note=f"{len(ids)} meetings")
 
 
@@ -489,7 +496,7 @@ async def sync_bases(store: Store, p: Progress):
             store.write_yaml(rel, _clean(rows))
         p.bump("bases")
 
-    await gather(*(one(t) for t in tokens))
+    await cli.spread(one, tokens)
     p.set("bases", state="done")
 
 
@@ -530,12 +537,13 @@ async def sync_wiki(store: Store, p: Progress):
         return found
 
     async def one(space: dict):
-        sid = space.get("space_id")
+        if not (sid := space.get("space_id")):
+            return
         store.write_yaml(f"wiki/{sid}/meta.yaml", space)
         store.write_yaml(f"wiki/{sid}/nodes.yaml", _clean(nodes := await walk(sid)))
         p.set("wiki", note=f"{len(nodes)} nodes")
 
-    await gather(*(one(s) for s in items))
+    await cli.spread(one, items)
     p.set("wiki", state="done")
 
 
