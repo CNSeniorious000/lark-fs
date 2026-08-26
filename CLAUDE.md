@@ -22,7 +22,13 @@ the sync reports success. Confirm the shape with a real call before writing a sy
 Known traps, all hit in practice:
 
 - `minutes +search` caps `--page-size` at 30; 50 is a hard 400.
-- `im +messages-search --page-all` silently stops at 40 pages (800 messages).
+- `im +messages-search` caps at 40 pages (800 messages) per query however the window is
+  sliced — it cannot mirror a conversation. `im +chat-messages-list` has no such ceiling
+  and reaches the first message in a chat (2020 vs 2026-07 on the same chat), so messages
+  are walked per chat with a cursor each, never through search.
+- Page-size ceilings differ per endpoint (50 for chat listing, 30 for `vc`/`minutes`
+  search); `paginate` reads the cap out of the rejection and retries, so call sites do
+  not carry the number.
 - `base +record-list` defaults to a *markdown table*, is offset-based, and returns a
   column matrix (`fields` + `data` + `record_id_list`) rather than row objects.
 - `base +table-list` wants `--base-token` (not `--app-token`) and keys tables by `id`.

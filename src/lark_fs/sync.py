@@ -6,7 +6,7 @@ Search-backed collections (docs/minutes/meetings) have no server-side cursor, so
 they re-list metadata (cheap) but skip fetching bodies for entities already on disk.
 """
 
-from asyncio import create_task, gather, sleep
+from asyncio import create_task, gather
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from re import compile
@@ -70,68 +70,70 @@ class Progress:
         self.rows[name] = {**row, "state": "running", "done": row["done"] + n, "last": last or row["last"]}
 
 
-async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, slice_hours: int = 12):
-    """Messages via the global search endpoint, walked forward in time slices.
+async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None = None):
+    """Messages, walked per chat with a cursor each.
 
-    Enumerating chats needs im:chat:read, which may be unauthorized; search only
-    needs the search scope and covers every chat the user can see, so it is the
-    primary path. Each message lands under its chat, partitioned by month.
-
-    Two constraints shape this loop. The endpoint's own `--page-all` caps at 40 pages
-    (800 messages) and returns them in one blocking call, so we page it ourselves --
-    that lifts the cap and lets progress tick per page instead of jumping. And it
-    rate-limits hard enough that a run *will* be cut short, so we advance in small
-    slices and commit the cursor after each one: an interrupted run resumes where it
-    stopped instead of discarding everything it already wrote.
+    The obvious route -- the global `+messages-search` endpoint -- is a trap: it caps at
+    40 pages (800 messages) per query no matter how the window is sliced, so a sweep over
+    it silently mirrors only the most recent slice of each conversation. `+chat-messages-list`
+    has no such ceiling and reaches back to the first message in a chat; listing chats and
+    walking each one is both complete and cheaper to resume, because a per-chat cursor
+    means an interrupted run only re-reads the chat it stopped in.
     """
-    p.set("messages", state="running")
-    cursor = store.cursors.get("messages")
-    start = datetime.fromisoformat(cursor) if cursor else datetime.now(UTC) - timedelta(days=window_days)
-    end = datetime.now(UTC)
-    seen_chats: set[str] = set()
+    known = chat_ids or await _list_chats(store, p)
+    cursors: dict[str, str] = store.cursors.setdefault("chats", {})
+    p.set("messages", state="running", total=len(known), done=0, note=f"{len(known)} chats")
     media: list[dict] = []
-    known_users: set[str] = set()
+    users: set[str] = set()
+    total = 0
 
-    slices = max(1, int((end - start).total_seconds() // (slice_hours * 3600)) + 1)
-    done_slices = 0
-    while start < end:
-        Aborted.check()
-        stop = min(start + timedelta(hours=slice_hours), end)
-        p.set("messages", state="running", note=f"{start:%m-%d %H:%M}  [{done_slices}/{slices}]")
-        argv = ["im", "+messages-search", "--query", "", "--start", _iso(start), "--end", _iso(stop), "--no-reactions"]
+    async def one(chat_id: str):
+        nonlocal total
+        since = cursors.get(chat_id)
+        argv = ["im", "+chat-messages-list", "--chat-id", chat_id, "--order", "asc", "--no-reactions", *(["--start", since] if since else [])]
+        newest = since
         try:
             async for msg in cli.paginate(*argv, key="messages", prefetch=True):
-                chat_id, mid = msg.get("chat_id"), msg.get("message_id")
-                if not chat_id or not mid:
+                if not (mid := msg.get("message_id")):
                     continue
-                seen_chats.add(chat_id)
                 created = msg.get("create_time", "")
-                month = created[:7] or "unknown"
                 thread = msg.get("thread_id")
-                rel = f"chats/{chat_id}/threads/{thread}/{mid}.yaml" if thread else f"chats/{chat_id}/messages/{month}/{mid}.yaml"
+                rel = f"chats/{chat_id}/threads/{thread}/{mid}.yaml" if thread else f"chats/{chat_id}/messages/{created[:7] or 'unknown'}/{mid}.yaml"
                 store.write_yaml(rel, _clean(msg))
-                media += _index_media(msg)
-                _record_sender(store, msg, known_users)
-                sender = (msg.get("sender") or {}).get("name") or ""
-                p.bump("messages", last=f"{msg.get('chat_name') or chat_id}  {sender}: {cli.oneline(msg.get('content'))}")
-                await sleep(0)  # keep the UI responsive; repaint rate is the TUI's concern
-        except cli.LarkError as e:
-            # keep whatever this run already committed; the next run picks up from `start`
-            _flush_media(store, media)
-            store.cursors["messages"] = start.isoformat()
+                media.extend(_index_media(msg))
+                _record_sender(store, msg, users)
+                total += 1
+                newest = max(newest or "", created)
+                if total % 20 == 0:
+                    sender = (msg.get("sender") or {}).get("name") or ""
+                    p.set("messages", last=f"{sender}: {cli.oneline(msg.get('content'), 40)}", note=f"{total} messages")
+        except cli.LarkError:
+            pass  # one unreadable chat must not sink the sweep; its cursor stays put
+        if newest and newest != since:
+            # store one second past the last message, or every run re-reads it
+            cursors[chat_id] = newest
             store.save_cursors()
-            p.set("messages", state="error", note=f"stopped at {start:%m-%d %H:%M}: {_reason(e)}")
-            return seen_chats
+        p.bump("messages")
 
-        _flush_media(store, media)
-        media.clear()
-        done_slices += 1
-        start = stop
-        store.cursors["messages"] = start.isoformat()
-        store.save_cursors()
+    for group in [sorted(known)[i : i + cli.CONCURRENCY] for i in range(0, len(known), cli.CONCURRENCY)]:
+        Aborted.check()
+        await gather(*(one(c) for c in group))
+    _flush_media(store, media)
+    p.set("messages", state="done", note=f"{total} messages across {len(known)} chats")
+    return known
 
-    p.set("messages", state="done", note=f"{len(seen_chats)} chats")
-    return seen_chats
+
+async def _list_chats(store: Store, p: Progress) -> set[str]:
+    """Every chat the user belongs to. Falls back to whatever is already mirrored."""
+    found: set[str] = set()
+    try:
+        async for chat in cli.paginate("im", "+chat-list", "--types", "p2p,group", key="chats"):
+            if cid := chat.get("chat_id"):
+                found.add(cid)
+                store.write_yaml(f"chats/{cid}/meta.yaml", _clean(chat))
+    except cli.LarkError:
+        pass
+    return found or {d.name for d in (store.root / "chats").glob("oc_*")}
 
 
 def _reason(e: cli.LarkError) -> str:
