@@ -236,10 +236,15 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     async def body(token: str):
         try:
             data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown")
-            if content := ((data or {}).get("document") or {}).get("content"):
-                store.write(f"docs/{token}/content.md", content)
         except cli.LarkError:
-            pass
+            # sheets, bitables and the like have no markdown body; remember that, or every
+            # run retries the same few hundred tokens forever
+            store.write(f"docs/{token}/.nobody", "")
+            return
+        if content := ((data or {}).get("document") or {}).get("content"):
+            store.write(f"docs/{token}/content.md", content)
+        else:
+            store.write(f"docs/{token}/.nobody", "")
         try:
             comments = await cli.run("drive", "+list-comments", "--token", token, "--type", "docx", "--solved-status", "all")
             if comments:
@@ -255,7 +260,7 @@ def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
     """True when the body is missing, or the server copy is newer than ours."""
     body = store.root / f"docs/{token}/content.md"
     if not body.exists():
-        return True
+        return not (store.root / f"docs/{token}/.nobody").exists()
     remote = meta.get("update_time")
     return bool(remote and remote > body.stat().st_mtime)
 
