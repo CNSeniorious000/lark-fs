@@ -174,46 +174,36 @@ def _index_media(msg: dict) -> list[dict]:
 
 
 async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
-    """Chat metadata + membership for every chat the user belongs to.
+    """Chat rosters. Metadata already landed when messages listed the chats.
 
-    `+chat-list` covers chats that have said nothing in the synced window, so it finds
-    more than the message sweep does; ids seen in messages are unioned in on top.
+    Membership is the part only this pass can get, and it is the expensive part, so a
+    chat whose roster is already on disk is skipped entirely.
     """
     p.set("chats", state="running")
-    listed: dict[str, dict] = {}
-    try:
-        async for chat in cli.paginate("im", "+chat-list", "--types", "p2p,group", key="chats"):
-            if cid := chat.get("chat_id"):
-                listed[cid] = chat
-    except cli.LarkError:
-        pass  # without im:chat:read we still have whatever the messages revealed
-
-    todo = [c for c in listed.keys() | chat_ids if not store.exists(f"chats/{c}/members.yaml")]
-    p.set("chats", total=len(todo))
+    known = chat_ids or {d.name for d in (store.root / "chats").glob("oc_*")}
+    todo = [c for c in known if not store.exists(f"chats/{c}/members.yaml")]
+    p.set("chats", total=len(todo), note=f"{len(known)} chats")
     if not todo:
-        p.set("chats", state="done", note=f"{len(listed)} known, up to date")
+        p.set("chats", state="done", note=f"{len(known)} chats, rosters up to date")
         return
 
     async def one(chat_id: str):
         try:
-            meta = await cli.run("im", "chats", "get", "--chat-id", chat_id)
-            store.write_yaml(f"chats/{chat_id}/meta.yaml", _clean(meta))
-        except cli.LarkError:
-            if base := listed.get(chat_id):
-                store.write_yaml(f"chats/{chat_id}/meta.yaml", _clean(base))
-        try:
             members = await cli.run("im", "+chat-members-list", "--chat-id", chat_id, "--page-all")
         except cli.LarkError:
-            p.bump("chats")
+            p.bump("chats")  # p2p chats and ones we lack scope for simply have no roster
             return
         store.write_yaml(f"chats/{chat_id}/members.yaml", _clean(members))
-        for u in ((members or {}).get("users") or []) + ((members or {}).get("bots") or []):
+        people = ((members or {}).get("users") or []) + ((members or {}).get("bots") or [])
+        for u in people:
             if oid := u.get("member_id") or u.get("open_id"):
                 store.write_yaml(f"users/{oid}/meta.yaml", _clean({"open_id": oid, **u}))
-        p.bump("chats")
+        p.bump("chats", last=f"{len(people)} members")
 
-    await gather(*(one(c) for c in todo))
-    p.set("chats", state="done", note=f"{len(listed)} listed")
+    for batch in [todo[i : i + cli.CONCURRENCY] for i in range(0, len(todo), cli.CONCURRENCY)]:
+        Aborted.check()
+        await gather(*(one(c) for c in batch))
+    p.set("chats", state="done", note=f"{len(known)} chats")
 
 
 def _record_sender(store: Store, msg: dict, known: set[str]):
