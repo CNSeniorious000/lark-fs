@@ -1,6 +1,6 @@
 """pnpm-style inline progress: a few lines redrawn in place, no alternate screen."""
 
-from asyncio import Event, Future, create_task, gather, sleep
+from asyncio import CancelledError, Event, Future, create_task, gather, sleep
 from contextlib import suppress
 from itertools import cycle
 from re import compile
@@ -143,6 +143,7 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
 
     painted = signal(len(rows))
     peak = len(rows)
+    settling = signal(False)  # the last frame keeps only what is on it
 
     @derived
     def view():
@@ -157,9 +158,11 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
             lines.append(to_formatted_text(HTML(_line(progress.rows[n], frame.get(), width))))
             lines += _feed(n, budget.get(n, 0), width) if budget.get(n) else []
         nonlocal peak
-        peak = max(peak, len(lines))
+        # holding the peak keeps a shrinking frame from leaving stale rows behind, but that
+        # padding would otherwise be frozen into scrollback as a gap the height of the feed
+        peak = len(lines) if settling.get() else max(peak, len(lines))
         painted.set(peak)
-        lines += [[]] * (peak - len(lines))  # pad, or a shrinking frame leaves stale rows on screen
+        lines += [[]] * (peak - len(lines))
         out: list = []
         for i, line in enumerate(lines):
             if i:
@@ -207,6 +210,12 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
         try:
             return await coro_factory(progress)
         finally:
+            # drop the padding and let one more frame land, or the gap it leaves is what
+            # stays in scrollback under the summary. On ctrl-c the sleep re-raises at once,
+            # and suppressing that is what keeps `app.exit()` reachable.
+            settling.set(True)
+            with suppress(CancelledError):
+                await sleep(0.05)
             app.exit()
 
     async def ui():
