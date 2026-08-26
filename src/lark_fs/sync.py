@@ -20,6 +20,10 @@ from .store import Store
 TZ = "+08:00"
 
 
+def _months_between(start: datetime, end: datetime) -> int:
+    return (end.year - start.year) * 12 + end.month - start.month + 1
+
+
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S") + TZ
 
@@ -69,10 +73,12 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
     media: list[dict] = []
     known_users: set[str] = set()
 
+    slices = max(1, int((end - start).total_seconds() // (slice_hours * 3600)) + 1)
+    done_slices = 0
     while start < end:
         Aborted.check()
         stop = min(start + timedelta(hours=slice_hours), end)
-        p.set("messages", state="running", note=f"{start:%m-%d %H:%M}")
+        p.set("messages", state="running", note=f"{start:%m-%d %H:%M}  [{done_slices}/{slices}]")
         argv = ["im", "+messages-search", "--query", "", "--start", _iso(start), "--end", _iso(stop), "--no-reactions"]
         try:
             async for msg in cli.paginate(*argv, key="messages", prefetch=True):
@@ -100,6 +106,7 @@ async def sync_messages(store: Store, p: Progress, *, window_days: int = 30, sli
 
         _flush_media(store, media)
         media.clear()
+        done_slices += 1
         start = stop
         store.cursors["messages"] = start.isoformat()
         store.save_cursors()
@@ -348,6 +355,8 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
     found: dict[str, dict] = {}
     month = datetime.fromisoformat(since).replace(tzinfo=UTC)
     now = datetime.now(UTC)
+    p.set("minutes", total=_months_between(month, now))
+    scanned = 0
     while month < now:
         nxt = (month + timedelta(days=32)).replace(day=1)
         try:
@@ -358,15 +367,15 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
             if not e.is_pagination_exhausted:
                 p.set("minutes", state="error", note=_reason(e))
                 return
+        scanned += 1
+        p.set("minutes", done=scanned, note=f"scanning {month:%Y-%m} · {len(found)} found")
         month = nxt
 
-    p.set("minutes", total=len(found))
     for token, item in found.items():
         store.write_yaml(f"minutes/{token}/meta.yaml", _clean(item))
-        p.bump("minutes", last=cli.oneline(_clean(item.get("display_info"))))
 
     todo = [t for t in found if not store.exists(f"minutes/{t}/transcript.txt")]
-    p.set("minutes", note=f"{len(todo)} transcripts to fetch")
+    p.set("minutes", done=0, total=len(todo), note=f"fetching transcripts · {len(found)} minutes")
 
     async def detail(token: str):
         Aborted.check()
@@ -375,6 +384,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
             data = await cli.run("minutes", "+detail", "--minute-tokens", token, "--transcript", "--summary", "--todo", "--chapter", "--keyword", cwd=str(store.root))
         except cli.LarkError:
             return
+        p.bump("minutes", last=cli.summarise_title((found.get(token) or {}).get("display_info")))
         for m in (data or {}).get("minutes") or []:
             arts = m.get("artifacts") or {}
             store.write_yaml(f"minutes/{token}/detail.yaml", _clean({k: v for k, v in m.items() if k != "artifacts"}))
@@ -386,7 +396,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "2023-01-01"):
                 store.write(f"minutes/{token}/summary.md", summary if isinstance(summary, str) else str(summary))
 
     await gather(*(detail(t) for t in todo))
-    p.set("minutes", state="done")
+    p.set("minutes", state="done", note=f"{len(found)} minutes")
 
 
 async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01"):
@@ -398,6 +408,8 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
     ids: list[str] = []
     month = datetime.fromisoformat(since).replace(tzinfo=UTC)
     now = datetime.now(UTC)
+    p.set("meetings", total=_months_between(month, now))
+    scanned = 0
     while month < now:
         nxt = (month + timedelta(days=32)).replace(day=1)
         try:
@@ -405,14 +417,16 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
                 if mid := item.get("id"):
                     ids.append(mid)
                     store.write_yaml(f"meetings/{mid}/meta.yaml", _clean(item))
-                    p.bump("meetings", last=cli.oneline(_clean(item.get("display_info"))))
         except cli.LarkError as e:
             if not e.is_pagination_exhausted:
                 p.set("meetings", state="error", note=_reason(e))
                 return
+        scanned += 1
+        p.set("meetings", done=scanned, note=f"scanning {month:%Y-%m} · {len(ids)} found")
         month = nxt
 
     todo = [i for i in ids if not store.exists(f"meetings/{i}/detail.yaml")]
+    p.set("meetings", done=0, total=len(todo), note=f"fetching details · {len(ids)} meetings")
     for batch in [todo[i : i + 20] for i in range(0, len(todo), 20)]:
         Aborted.check()
         try:
@@ -421,7 +435,8 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "2023-01-01")
             continue
         for m in (data or {}).get("meetings") or []:
             store.write_yaml(f"meetings/{m['meeting_id']}/detail.yaml", _clean(m))
-    p.set("meetings", state="done")
+        p.bump("meetings", len(batch))
+    p.set("meetings", state="done", note=f"{len(ids)} meetings")
 
 
 async def sync_bases(store: Store, p: Progress):

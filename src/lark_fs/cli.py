@@ -86,12 +86,17 @@ def oneline(text, limit: int = 60) -> str:
     return flat[: limit - 1] + "…" if len(flat) > limit else flat
 
 
+def summarise_title(text) -> str:
+    """One-line display form of a title: markup stripped, keyword blurb dropped."""
+    return oneline(RE_MARKUP.sub("", unescape_entities(str(text or ""))).split("关键词")[0], 48)
+
+
 def _title(item) -> str:
     if not isinstance(item, dict):
         return ""
     for key in TITLE_KEYS:
         if isinstance(v := item.get(key), str) and v.strip():
-            return oneline(unescape_entities(v.replace("<h>", "").replace("</h>", "")), 48)
+            return summarise_title(v)
     if isinstance(nested := item.get("result_meta"), dict):
         return _title(nested)  # drive search nests the fields one level down
     return ""
@@ -147,6 +152,7 @@ def _label(argv: tuple[str, ...]) -> tuple[str, str]:
 
 
 RE_ID = compile(r"(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{8,}")
+RE_MARKUP = compile(r"</?[a-zA-Z][^>]*>")
 RE_DATE = compile(r"\d{4}-\d{2}-\d{2}")
 RE_CODE = compile(r'"code":\s*(\d+)')
 
