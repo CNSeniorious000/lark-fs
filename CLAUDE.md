@@ -122,6 +122,11 @@ not one that only shows in a transient state:
   `messages` and `meetings` showed no in-flight requests at all. Bounding in-flight work
   costs no throughput; the semaphore was always the ceiling. Diagnose it with
   `pgrep -P <pid>`: if every child is the same subcommand, that is starvation, not a hang.
+- A single chat can hold more messages than every other one combined (here: 181875, 16x
+  the runner-up). Past `SLICE_AFTER` messages the rest of its range is walked as parallel
+  `--start`/`--end` windows -- those bounds are exclusive at the top, so windows tile
+  without gaps or overlap. Never store a window boundary as the cursor: the last one ends
+  in the future and would skip everything sent between now and then.
 - Count attempts, not successes. A syncer that returns early on `LarkError` without
   bumping leaves the row at 218/256 forever. Put the `p.bump` in a `finally`.
 - One row, one denominator. A collection with a discovery pass and a fetch pass must
