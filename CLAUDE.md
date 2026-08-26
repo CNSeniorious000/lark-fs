@@ -140,6 +140,15 @@ not one that only shows in a transient state:
   refuses to commit it. Every tool that reads ignore files follows it in, so anything that
   walks the tree needs its own exclusion -- ruff started reformatting Python inside
   mirrored documents, and pytest collected 300k files looking for tests.
+- A failed request and an empty answer must stay distinguishable. `+node-list` returning
+  `[]` meant both "this branch has no children" and "this was rate-limited", and writing
+  that result replaced a 2205-node list with `[]` -- taking with it the only mapping from
+  a wiki node_token to the document it points at. Never let a partial walk overwrite a
+  complete one; keep the copy on disk instead.
+- `run_with_tui` raises `KeyboardInterrupt` for a keystroke and `SyncAbortedError` for
+  everything else, because only it knows which happened. hmr.py distinguishes a reload
+  from a ctrl-c by asking whether `post_reload` fired, so one exception for both meant a
+  ctrl-c landing just after a reload was read as "restart me".
 - Count attempts, not successes. A syncer that returns early on `LarkError` without
   bumping leaves the row at 218/256 forever. Put the `p.bump` in a `finally`.
 - One row, one denominator. A collection with a discovery pass and a fetch pass must
