@@ -39,6 +39,9 @@ testpaths = ["tests"]
 
 [tool.pyright]
 typeCheckingMode = "standard"
+# stated rather than inferred: basedpyright reads the interpreter it happens to find, and
+# without this it rejects PEP 695 generics, `type` aliases and unparenthesized except groups
+pythonVersion = "3.14"
 exclude = ["lark-data", ".venv"]
 venvPath = "."
 venv = ".venv"
@@ -57,4 +60,5 @@ lark-status = "uv run lark-fs status"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.16.4",
 ]

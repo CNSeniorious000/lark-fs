@@ -5,8 +5,11 @@ Mirrors Feishu/Lark onto disk as a greppable, ID-addressed file tree, driving th
 
 ## Working on this
 
-- `uvx ruff check . && uvx ruff format .` and `uvx pyright` before committing. Both are
-  configured strictly on purpose, and pyright reads the project venv via `pyproject.toml`.
+- `uv run ruff check . && uv run ruff format .` and `pyright` before committing. Both are
+  configured strictly on purpose. ruff is pinned in the dev group so CI formats the way
+  this machine does; pyright is whatever is on PATH, which here is basedpyright -- hence
+  the explicit `pythonVersion`, without which it rejects PEP 695 generics and `type`
+  aliases as too new.
 - `uv run pytest tests` covers the failures that were silent. When adding one, revert the
   fix and watch it go red — a test that never failed proves nothing. Twice now a
   string-replace edit matched nothing and quietly "verified" an unchanged file.

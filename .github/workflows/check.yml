@@ -16,4 +16,6 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -q
-      - run: uvx pyright
+      # not a project dependency on purpose -- it ships a node runtime. The [nodejs]
+      # extra bundles one, so the check does not depend on what the runner happens to have.
+      - run: uvx --from "pyright[nodejs]" pyright
