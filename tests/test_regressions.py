@@ -8,7 +8,7 @@ from re import findall
 from lark_fs import cli
 from lark_fs.attachments import Policy, _pending
 from lark_fs.store import Store
-from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, _note_tenant, _windows
+from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, _note_tenant, _wiki_aliases, _windows
 from lark_fs.yaml import readable_yaml_dumps
 
 
@@ -144,3 +144,17 @@ def test_links_degrade_instead_of_pointing_at_the_wrong_tenant():
         assert cli.link_for("oc_1a2b3c4d5e6f").startswith("https://applink.feishu.cn/")
     finally:
         cli.TENANT = before
+
+
+def test_a_wiki_node_token_resolves_to_the_document_it_points_at(tmp_path):
+    """Drive answers 1069307 for a node token, and mirroring under both names stores the
+    same document twice -- the node list is the only thing that can translate them."""
+    store = Store(tmp_path)
+    store.write_yaml(
+        "wiki/7383/nodes.yaml",
+        [
+            {"node_token": "Nod1", "obj_token": "Obj1", "obj_type": "docx", "title": "a"},
+            {"node_token": "Nod2", "obj_type": "docx", "title": "no obj_token"},
+        ],
+    )
+    assert _wiki_aliases(store) == {"Nod1": "Obj1"}

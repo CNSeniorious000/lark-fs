@@ -222,6 +222,15 @@ class LarkError(Exception):
         return self._code == 99991400 or "rate_limit" in str(self.payload)
 
     @property
+    def is_missing(self):
+        """1069307: this endpoint will never have anything for that token.
+
+        Permanent, unlike a rate limit -- worth remembering, so the same request is not
+        reissued on every run.
+        """
+        return self._code == 1069307
+
+    @property
     def is_quota_exhausted(self):
         """99991403: the tenant's *monthly* API allowance is gone.
 

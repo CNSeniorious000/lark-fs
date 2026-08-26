@@ -305,21 +305,42 @@ def _record_sender(store: Store, msg: dict, known: set[str]):
 DOC_QUERIES = ["", "a", "e", "的", "会议", "设计", "项目", "需求", "方案", "数据", "模型", "文档", "记录", "计划"]
 
 
+def _wiki_aliases(store: Store) -> dict[str, str]:
+    """node_token -> obj_token, from the node lists already on disk.
+
+    A search hit of entity_type WIKI carries a *node* token, not the document's own. Both
+    work for fetching a body -- lark-cli resolves them -- but Drive answers 1069307 "not
+    exist" when asked for comments, and that was a thousand wasted requests every run.
+    Translating also merges those hits with the copies the wiki walk found, instead of
+    mirroring the same document under two names.
+    """
+    return {
+        n["node_token"]: n["obj_token"]
+        for f in (store.root / "wiki").glob("*/nodes.yaml")
+        for n in store.read_yaml_rows(f"wiki/{f.parent.name}/nodes.yaml")
+        if n.get("node_token") and n.get("obj_token")
+    }
+
+
 async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None):
     """Cloud docs discovered via search and via wiki nodes, exported to markdown, plus comments."""
     p.set("docs", state="running")
     seen: dict[str, dict] = {}
+    alias = _wiki_aliases(store)
     for q in queries or DOC_QUERIES:
         try:
             async for r in cli.paginate("drive", "+search", "--query", q, key="results"):
                 meta = r.get("result_meta") or {}
-                token = meta.get("token")
-                if not token or token in seen:
+                if not (token := str(meta.get("token") or "")):
+                    continue
+                if r.get("entity_type") == "WIKI":
+                    token = alias.get(token, token)  # the node token this hit carries is not the document's own
+                if token in seen:
                     continue
                 title = _clean(r.get("title_highlighted"))
                 _note_tenant(meta.get("url", ""))
-                seen[token] = {**meta, "title": title}
-                store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "entity_type": r.get("entity_type"), "title": title})
+                seen[token] = {**meta, "token": token, "title": title}
+                store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "token": token, "entity_type": r.get("entity_type"), "title": title})
                 p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:
             continue
@@ -353,12 +374,17 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         # or every run retries the same few hundred tokens forever
         content = ((data or {}).get("document") or {}).get("content")
         store.write(f"docs/{token}/content.md", content) if content else store.write(f"docs/{token}/.nobody", "")
+        if store.exists(f"docs/{token}/.nocomments"):
+            return
         try:
             comments = await cli.run("drive", "+list-comments", "--token", token, "--type", "docx", "--solved-status", "all")
             if comments:
                 store.write_yaml(f"docs/{token}/comments.yaml", comments)
-        except cli.LarkError:
-            pass
+        except cli.LarkError as e:
+            # a token Drive does not recognise never will; anything else may just be a
+            # rate limit, and marking that would lose the comments for good
+            if e.is_missing:
+                store.write(f"docs/{token}/.nocomments", "")
 
     await cli.spread(body, todo)
     p.set("docs", state="done", note=f"{len(seen)} docs")
@@ -592,38 +618,53 @@ async def sync_wiki(store: Store, p: Progress):
     items = (spaces or {}).get("spaces") or []
     p.set("wiki", note=f"{len(items)} spaces")
 
-    async def level(sid: str, parent: str | None) -> list[dict]:
+    async def level(sid: str, parent: str | None) -> list[dict] | None:
+        """One level of the tree, or None when the request failed.
+
+        The distinction matters: a leaf and a rate-limited branch both have no nodes to
+        return, and conflating them lets a failure look like an answer.
+        """
         argv = ["wiki", "+node-list", "--space-id", sid, "--page-all", *(["--parent-node-token", parent] if parent else [])]
         try:
             return ((await cli.run(*argv)) or {}).get("nodes") or []
         except cli.LarkError:
-            return []
+            return None
 
-    async def walk(sid: str) -> list[dict]:
+    async def walk(sid: str) -> tuple[list[dict], bool]:
         """Wiki nodes form a tree and `+node-list` returns one level at a time.
 
         Breadth-first with a bounded fan-out per round: recursing with `gather` queues the
         whole subtree at once, which floods the API into a rate limit even though the
-        semaphore caps what runs concurrently.
+        semaphore caps what runs concurrently. Also reports whether every level answered.
         """
         found: list[dict] = []
-        frontier = [None]
+        whole = True
+        frontier: list[str | None] = [None]
         while frontier:
             batch, frontier = frontier[: cli.CONCURRENCY], frontier[cli.CONCURRENCY :]
             for nodes in await gather(*(level(sid, parent) for parent in batch)):
+                if nodes is None:
+                    whole = False
+                    continue
                 found += nodes
                 frontier += [n["node_token"] for n in nodes if n.get("has_child")]
             # the tree's size is only known as it is walked, so report nodes against the
             # frontier still queued -- a space count would sit at 0/1 for the whole sweep
             p.set("wiki", done=len(found), total=len(found) + len(frontier), note=f"{len(frontier)} branches queued")
-        return found
+        return found, whole
 
     async def one(space: dict):
         if not (sid := space.get("space_id")):
             return
         store.write_yaml(f"wiki/{sid}/meta.yaml", space)
-        store.write_yaml(f"wiki/{sid}/nodes.yaml", _clean(nodes := await walk(sid)))
-        p.set("wiki", note=f"{len(nodes)} nodes")
+        nodes, whole = await walk(sid)
+        rel = f"wiki/{sid}/nodes.yaml"
+        # A partial walk must not overwrite a complete one. This node list is the only
+        # place a wiki node_token can be resolved to the document it points at, and one
+        # rate-limited level used to be enough to replace the whole thing with `[]`.
+        if whole or not store.exists(rel):
+            store.write_yaml(rel, _clean(nodes))
+        p.set("wiki", note=f"{len(nodes)} nodes" + ("" if whole else ", partial -- kept the copy on disk"))
 
     await cli.spread(one, items)
     p.set("wiki", state="done")
