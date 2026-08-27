@@ -364,7 +364,14 @@ def _write_thread(store: Store, chat_id: str, thread: str, msg: dict) -> list[di
     replies = msg.get("thread_replies") or []
     root = {k: v for k, v in msg.items() if k != "thread_replies"}
     at = f"chats/{chat_id}/threads/{thread}"
-    store.write_yaml(f"{at}/meta.yaml", _thread_meta(root, replies))
+    # A listing inlines at most 50 replies, and a repair may already have written more, so
+    # the inline view is a floor and not the truth. Reporting it as the truth walked a
+    # thread's count backwards -- one on this store said `replies: 0` beside five reply
+    # files -- and reset `has_more`, which re-queued a repair that had already finished.
+    on_disk = {p.stem for p in (store.root / at).glob("*.yaml")} - {"meta", root.get("message_id", "")}
+    meta = _thread_meta(root, replies)
+    known = on_disk | {r.get("message_id", "") for r in replies}
+    store.write_yaml(f"{at}/meta.yaml", {**meta, "replies": max(len(replies), len(known)), "last_reply": max(meta["last_reply"], store.read_yaml(f"{at}/meta.yaml").get("last_reply") or "")})
     for m in (root, *replies):
         store.write_yaml(f"{at}/{m['message_id']}.yaml", _clean(m))
     if root.get("thread_has_more"):
@@ -416,6 +423,12 @@ async def repair_thread(store: Store, thread: str, chat: str) -> list[dict]:
         return []
     for r in replies:
         store.write_yaml(f"{at}/{r['message_id']}.yaml", _clean(r))
+    if not replies:
+        # An empty answer is the failure the caller already reads it as. Writing meta here
+        # anyway set `replies: 0, has_more: False` over a count that was right, left the
+        # files it described orphaned, and kept the thread queued -- refetched every run,
+        # with the record of what it holds now saying it holds nothing.
+        return []
     meta = store.read_yaml(f"{at}/meta.yaml")
     store.write_yaml(f"{at}/meta.yaml", {**meta, "replies": len(replies), "has_more": False, "last_reply": max((r.get("create_time") or "" for r in replies), default=meta.get("last_reply", ""))})
     return replies

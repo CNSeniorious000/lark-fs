@@ -1156,3 +1156,41 @@ def test_the_recheck_tier_does_not_clobber_the_sweep_it_runs_beside(tmp_path, mo
     assert after.get("recheck_after"), "the tier's own cursor was not persisted"
     assert after.get("chats") == {"oc_1": "2026-08-03 11:17"}, "the sweep's chat cursors were rolled back to the daemon's startup snapshot"
     assert after.get("threads_incomplete") == {"omt_1": "oc_1"}, "threads left truncated at the inline cap lost the only record that would fix them"
+
+
+def test_a_thread_meta_never_reports_fewer_replies_than_it_holds(tmp_path):
+    """A listing inlines at most 50 replies, and a repair may already have written more, so
+    the inline view is a floor and not the truth. Reporting it as the truth walked a
+    thread's count backwards -- one on the real store said `replies: 0` beside five reply
+    files -- and reset `has_more`, re-queueing a repair that had already finished."""
+    from lark_fs.sync import _write_thread
+
+    store = Store(tmp_path)
+    at = "chats/oc_1/threads/omt_1"
+    root = {"message_id": "om_root", "thread_id": "omt_1", "chat_id": "oc_1", "create_time": "2026-08-04 22:19"}
+
+    _write_thread(store, "oc_1", "omt_1", {**root, "thread_replies": [{"message_id": f"om_r{i}", "create_time": f"2026-08-04 22:2{i}"} for i in range(5)]})
+    assert store.read_yaml(f"{at}/meta.yaml")["replies"] == 5
+
+    _write_thread(store, "oc_1", "omt_1", root)  # sighted again with nothing inlined
+    meta = store.read_yaml(f"{at}/meta.yaml")
+    assert meta["replies"] == 5, f"the count walked backwards past what is on disk: {meta}"
+    assert meta["last_reply"] == "2026-08-04 22:24", f"the newest reply was forgotten: {meta}"
+
+
+def test_an_empty_repair_leaves_the_record_it_found(tmp_path, monkeypatch):
+    """`repair_thread` wrote `replies: 0, has_more: False` for a successful call that
+    returned nothing -- over a count that was right, orphaning the files it described. Its
+    caller reads `[]` as failure and leaves the thread queued, so the pair meant a thread
+    refetched on every run whose record said it held nothing."""
+    from lark_fs import sync as sync_module
+
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))
+    store = Store(tmp_path)
+    at = "chats/oc_1/threads/omt_1"
+    store.write_yaml(f"{at}/meta.yaml", {"thread_id": "omt_1", "root_message_id": "om_root", "replies": 5, "has_more": True, "last_reply": "2026-08-04 22:24"})
+
+    assert run(sync_module.repair_thread(store, "omt_1", "oc_1")) == []
+    meta = store.read_yaml(f"{at}/meta.yaml")
+    assert meta["replies"] == 5, f"an empty answer erased a count that was right: {meta}"
+    assert meta["has_more"] is True, "a thread that was never actually repaired was marked complete"
