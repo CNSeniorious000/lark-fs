@@ -226,6 +226,28 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         await cli.spread(repair, sorted(cut.items()))
         store.save_cursors()
 
+    async def rewrite(chunk: list[tuple[str, str]]):
+        """Re-fetch messages whose file on disk cannot be parsed, and write them again."""
+        try:
+            data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(mid for mid, _ in chunk), "--no-reactions")
+        except cli.LarkError:
+            return  # stays on the list
+        returned = {m["message_id"]: m for m in (data or {}).get("messages") or []}
+        for mid, rel in chunk:
+            if msg := returned.get(mid):
+                store.write_yaml(rel, _clean(msg))
+                media.extend(_index_media(msg))
+                _record_sender(store, msg, users)
+            broken.pop(mid, None)  # a message the server no longer has is not coming back
+        p.set("messages", note=f"{total} messages, {len(broken)} unreadable files left")
+
+    # The file is on disk but unparseable, so only the API still holds the real content.
+    # `reindex` is what finds them -- a scan of every message is far too slow to run here.
+    if broken := store.cursors.get("messages_unreadable") or {}:
+        items = sorted(broken.items())
+        await cli.spread(rewrite, [items[i : i + 50] for i in range(0, len(items), 50)])
+        store.save_cursors()
+
     _flush_media(store, media)
     p.set("messages", state="done", note=f"{total} messages across {len(known)} chats")
     return known

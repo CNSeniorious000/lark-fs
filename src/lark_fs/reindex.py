@@ -25,8 +25,11 @@ def reindex(root: Path) -> dict[str, int]:
         try:
             msg = safe_load(path.read_text())
         except YAMLError:
-            # written before control characters were stripped; re-syncing that slice fixes it
+            # Written by a serializer that could not round-trip what the message contained.
+            # The file is on disk but says nothing readable, and only the API still has the
+            # real content -- so record the id for the next sync to fetch and rewrite.
             unreadable.append(path)
+            store.cursors.setdefault("messages_unreadable", {})[path.stem] = str(path.relative_to(root))
             continue
         if not isinstance(msg, dict) or not msg.get("message_id"):
             continue
@@ -35,4 +38,5 @@ def reindex(root: Path) -> dict[str, int]:
         _record_sender(store, msg, known)
 
     _flush_media(store, media)
+    store.save_cursors()
     return {"messages": scanned, "users": len(known), "media": len(media), "unreadable": len(unreadable), "threads_split": split}
