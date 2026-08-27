@@ -574,7 +574,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # wiki nodes point at real documents and are enumerated exhaustively, unlike search
     for node in store.glob_rows("wiki/*/nodes.yaml"):
         if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
-            seen[token] = {"title": node.get("title", "")}
+            seen[token] = {"title": node.get("title", ""), "obj_type": node.get("obj_type")}
             store.write_yaml(
                 f"docs/{token}/meta.yaml",
                 {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")},
@@ -592,19 +592,22 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         try:
             data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {title}")
         except cli.LarkError as e:
-            if e.is_unsupported_type:
-                store.write(f"docs/{token}/.nobody", "")  # a sheet has no markdown body and never will
-            return  # anything else is transient: leave it due, the next run retries it
+            if not e.is_unsupported_type:
+                return  # transient: leave it due, the next run retries it
+            data = None  # only docx exports markdown -- but a sheet still carries comments, so keep going
         finally:
             p.bump("docs", last=title)  # count attempts, not successes, or the fraction never reaches its end
-        # sheets, bitables and the like answer fine but carry no markdown body; record that,
-        # or every run retries the same few hundred tokens forever
+        # sheets, bitables and the like carry no markdown body; record that, or every run
+        # retries the same few hundred tokens forever
         content = ((data or {}).get("document") or {}).get("content")
         store.write(f"docs/{token}/content.md", content) if content else store.write(f"docs/{token}/.nobody", "")
         if store.exists(f"docs/{token}/.nocomments"):
             return
         try:
-            comments = await cli.run("drive", "+list-comments", "--token", token, "--type", "docx", "--solved-status", "all")
+            # asking as `docx` is what Drive recognises the token *as*, and a sheet asked
+            # for as one answers 1069307 -- an error we then remember as "has no comments".
+            # 220 sheets and bitables lost their comments that way, to a mistake of our own.
+            comments = await cli.run("drive", "+list-comments", "--token", token, "--type", seen[token].get("obj_type") or "docx", "--solved-status", "all")
             if comments:
                 store.write_yaml(f"docs/{token}/comments.yaml", comments)
         except cli.LarkError as e:

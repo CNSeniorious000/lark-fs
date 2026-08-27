@@ -459,3 +459,32 @@ def test_a_permanent_failure_is_remembered_not_retried_forever():
     assert not unsupported.is_rate_limited, "marking a rate limit permanent would discard the document for good"
     throttled = cli.LarkError(["docs", "+fetch"], {"error": {"code": 99991400}})
     assert not throttled.is_unsupported_type
+
+
+def test_a_sheet_is_asked_for_as_a_sheet(tmp_path, monkeypatch):
+    """`--type` was pinned to `docx`, and Drive answers 1069307 for a sheet asked for as
+    one -- the same code that means "this token does not exist", which we then remember as
+    `.nocomments`. 220 sheets and bitables lost their comments to a mistake of our own.
+
+    The `+fetch` failure is the second half: only docx exports markdown, so a sheet's body
+    fetch fails permanently, and returning there skips the comments pass for good.
+    """
+    from lark_fs import sync as sync_module
+
+    asked: list[tuple[str, str]] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+fetch":
+            raise cli.LarkError(list(argv), {"error": {"code": 3380002, "message": "Unsupported document type 'sheet'."}})
+        asked.append((argv[argv.index("--token") + 1], argv[argv.index("--type") + 1]))
+        return {"items": [{"comment_id": "c1"}]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("wiki/s1/nodes.yaml", [{"node_token": "n1", "obj_token": "tok1", "obj_type": "sheet", "title": "roster"}])
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+
+    assert asked == [("tok1", "sheet")], f"a sheet was not asked for as a sheet: {asked}"
+    assert store.exists("docs/tok1/comments.yaml"), "the body fetch failing took the comments with it"
+    assert store.exists("docs/tok1/.nobody"), "a document that can never have a body was left due"
