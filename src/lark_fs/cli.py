@@ -231,6 +231,17 @@ class LarkError(Exception):
         return self._code == 1069307
 
     @property
+    def is_unsupported_type(self):
+        """3380002: this token names a sheet or a bitable, and only docx exports markdown.
+
+        Permanent, like `is_missing`. Measured before this was told apart from a rate
+        limit: 146 sheets and bitables, re-fetched on every single sync and failing
+        identically every time -- 31% of what a sync cost once the discovery passes were
+        put on a schedule.
+        """
+        return self._code == 3380002
+
+    @property
     def is_quota_exhausted(self):
         """99991403: the tenant's *monthly* API allowance is gone.
 

@@ -442,3 +442,14 @@ def test_a_sweep_comes_due_again(tmp_path):
     swept_recently(store, "wiki", 24)
     store.cursors["swept"]["wiki"] = (datetime.now(UTC) - timedelta(hours=25)).isoformat(timespec="seconds")
     assert swept_recently(store, "wiki", 24) is False
+
+
+def test_a_permanent_failure_is_remembered_not_retried_forever():
+    """A sheet has no markdown body and never will, but the fetch failed the same way a
+    rate limit does and was treated the same: 146 of them were re-requested on every sync,
+    31% of the run. `is_missing` already drew this line for a different code."""
+    unsupported = cli.LarkError(["docs", "+fetch"], {"error": {"code": 3380002, "message": "Unsupported document type 'bitable'. Only docx is supported."}})
+    assert unsupported.is_unsupported_type
+    assert not unsupported.is_rate_limited, "marking a rate limit permanent would discard the document for good"
+    throttled = cli.LarkError(["docs", "+fetch"], {"error": {"code": 99991400}})
+    assert not throttled.is_unsupported_type

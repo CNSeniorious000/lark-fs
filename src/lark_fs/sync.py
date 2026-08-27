@@ -591,8 +591,10 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         title = cli.oneline(seen[token].get("title") or token, 48)
         try:
             data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {title}")
-        except cli.LarkError:
-            return  # transient: leave it due, the next run retries it
+        except cli.LarkError as e:
+            if e.is_unsupported_type:
+                store.write(f"docs/{token}/.nobody", "")  # a sheet has no markdown body and never will
+            return  # anything else is transient: leave it due, the next run retries it
         finally:
             p.bump("docs", last=title)  # count attempts, not successes, or the fraction never reaches its end
         # sheets, bitables and the like answer fine but carry no markdown body; record that,
