@@ -629,18 +629,24 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
 
     async def body(token: str):
         title = cli.oneline(seen[token].get("title") or token, 48)
+        unsupported = False
         try:
             data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {title}")
         except cli.LarkError as e:
             if not e.is_unsupported_type:
                 return  # transient: leave it due, the next run retries it
-            data = None  # only docx exports markdown -- but a sheet still carries comments, so keep going
+            data, unsupported = None, True  # only docx exports markdown -- but a sheet still carries comments, so keep going
         finally:
             p.bump("docs", last=title)  # count attempts, not successes, or the fraction never reaches its end
-        # sheets, bitables and the like carry no markdown body; record that, or every run
-        # retries the same few hundred tokens forever
         content = ((data or {}).get("document") or {}).get("content")
-        store.write(f"docs/{token}/content.md", content) if content else store.write(f"docs/{token}/.nobody", "")
+        if content:
+            store.write(f"docs/{token}/content.md", content)
+        else:
+            # An empty body now is not an empty body forever: a docx written later has
+            # content where it had none, and a bare marker outlasts it. Only "unsupported"
+            # is a permanent verdict; the marker records which of the two this was, and its
+            # own mtime is what an empty one is re-checked against.
+            store.write(f"docs/{token}/.nobody", "unsupported" if unsupported else "")
         if store.exists(f"docs/{token}/.nocomments"):
             return
         try:
@@ -685,12 +691,21 @@ def _doc_type(meta: dict) -> str:
 
 
 def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
-    """True when the body is missing, or the server copy is newer than ours."""
-    body = store.root / f"docs/{token}/content.md"
-    if not body.exists():
-        return not (store.root / f"docs/{token}/.nobody").exists()
+    """True when the body is missing, or the server copy is newer than ours.
+
+    A `.nobody` marker stands in for the body it does not have, and is read the same way:
+    "unsupported" is permanent -- only docx exports markdown and that will not change --
+    while an empty one only means the document was empty when we last looked, and its mtime
+    is when that was. Treating the two alike froze an empty docx out of every later run.
+    """
     remote = meta.get("update_time")
-    return bool(remote and remote > body.stat().st_mtime)
+    body = store.root / f"docs/{token}/content.md"
+    if body.exists():
+        return bool(remote and remote > body.stat().st_mtime)
+    mark = store.root / f"docs/{token}/.nobody"
+    if not mark.exists():
+        return True
+    return False if mark.read_text() == "unsupported" else bool(remote and remote > mark.stat().st_mtime)
 
 
 def _edit_signal(msg: dict) -> tuple:

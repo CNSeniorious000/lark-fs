@@ -691,3 +691,37 @@ def test_the_media_index_is_durable_before_the_cursor_is(tmp_path, monkeypatch):
 
     assert saved, "the cursor never became durable, so the test proves nothing"
     assert store.read_yaml_rows("chats/oc_1/media.yaml"), "the cursor outlived the media index it was supposed to follow"
+
+
+def test_raising_the_cap_settles_the_file_it_brings_back(tmp_path):
+    """The marker carries the size that disqualified a file so raising `max_mb` brings it
+    back -- but the download that brings it back left the marker in place, and `_settled`
+    reads a marker as "not settled at this cap". The bytes are on disk and fetched again on
+    every run, forever."""
+    store = Store(tmp_path)
+    row = {"key": "file_1", "name": "big.md", "chat_id": "oc_1", "message_id": "om_1"}
+    dest = store.root / "chats/oc_1/files/file_1"
+    dest.mkdir(parents=True)
+    (dest / ".oversize").write_text(str(30 * 1024 * 1024))
+    (dest / "big.md").write_text("x")
+
+    assert _settle(dest, {"saved_path": str(dest / "big.md"), "size_bytes": 30 * 1024 * 1024}, 40 * 1024 * 1024)
+    assert _pending(store, Policy({"text"}, 40 * 1024 * 1024), [row]) == [], "the file is on disk and still queued for download"
+
+
+def test_an_empty_body_is_not_an_empty_body_forever(tmp_path):
+    """`.nobody` meant two different things: "this is a sheet, and only docx exports
+    markdown" -- permanent -- and "this docx had nothing in it when we looked", which stops
+    being true the moment somebody types in it. Read alike, the second froze the document
+    out of every later run."""
+    from lark_fs.sync import _doc_is_stale
+
+    store = Store(tmp_path)
+    later = datetime.now(UTC).timestamp() + 3600
+
+    store.write("docs/sheet_1/.nobody", "unsupported")
+    assert _doc_is_stale(store, "sheet_1", {"update_time": later}) is False, "a sheet was re-fetched for a body it can never have"
+
+    store.write("docs/doc_1/.nobody", "")
+    assert _doc_is_stale(store, "doc_1", {"update_time": later}) is True, "a docx edited after we saw it empty stayed empty on disk"
+    assert _doc_is_stale(store, "doc_1", {"update_time": 1}) is False, "an untouched empty document was re-fetched anyway"

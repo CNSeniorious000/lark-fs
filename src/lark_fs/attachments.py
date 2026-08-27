@@ -109,9 +109,14 @@ def _settle(dest: Path, data: dict, cap: int) -> bool:
         # a bare marker would make the first cap that rejected a file the permanent one
         (dest / OVERSIZE).write_text(str(size))
         return False
-    if saved.is_file() and not saved.suffix and (suffix := _suffix_for(saved.read_bytes()[:12])):
-        # named by the key alone it is neither openable nor reachable by `fd -e jpg`
-        saved.rename(saved.with_name(saved.name + suffix))
+    if saved.is_file():
+        # It fit this time, which usually means max_mb was raised. A marker left behind
+        # still reads as "not settled at this cap", so the file is fetched again on every
+        # run for as long as it exists -- with the bytes already sitting next to it.
+        (dest / OVERSIZE).unlink(missing_ok=True)
+        if not saved.suffix and (suffix := _suffix_for(saved.read_bytes()[:12])):
+            # named by the key alone it is neither openable nor reachable by `fd -e jpg`
+            saved.rename(saved.with_name(saved.name + suffix))
     return True
 
 
