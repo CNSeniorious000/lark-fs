@@ -574,13 +574,21 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 meta = r.get("result_meta") or {}
                 if not (token := str(meta.get("token") or "")):
                     continue
+                kind = ""
                 if r.get("entity_type") == "WIKI":
-                    token = alias.get(token, token)  # the node token this hit carries is not the document's own
+                    if resolved := alias.get(token):
+                        token = resolved  # the node token this hit carries is not the document's own
+                    else:
+                        # Not in any node list we hold, so the node token is all we will ever
+                        # have for it. Drive answers 1069307 for a node token asked for as the
+                        # docx it wraps, and answers it as `wiki` -- and 131005 if a resolved
+                        # obj_token is asked for that way, so this cannot be applied blanket.
+                        kind = "wiki"
                 if token in seen:
                     continue
                 title = _clean(r.get("title_highlighted"))
                 _note_tenant(meta.get("url", ""))
-                seen[token] = {**meta, "token": token, "title": title}
+                seen[token] = {**meta, "token": token, "title": title, **({"comment_type": kind} if kind else {})}
                 store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "token": token, "entity_type": r.get("entity_type"), "title": title})
                 p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:
@@ -627,10 +635,11 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         if store.exists(f"docs/{token}/.nocomments"):
             return
         try:
-            # asking as `docx` is what Drive recognises the token *as*, and a sheet asked
-            # for as one answers 1069307 -- an error we then remember as "has no comments".
-            # 220 sheets and bitables lost their comments that way, to a mistake of our own.
-            comments = await cli.run("drive", "+list-comments", "--token", token, "--type", seen[token].get("obj_type") or "docx", "--solved-status", "all")
+            # asking as `docx` is what Drive recognises the token *as*, and anything that is
+            # not one answers 1069307 -- an error we then remember as "has no comments".
+            # 220 sheets and bitables from the wiki, and 203 more from search, lost their
+            # comments that way, to a mistake of our own.
+            comments = await cli.run("drive", "+list-comments", "--token", token, "--type", _doc_type(seen[token]), "--solved-status", "all")
             if comments:
                 store.write_yaml(f"docs/{token}/comments.yaml", comments)
         except cli.LarkError as e:
@@ -641,6 +650,29 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
 
     await cli.spread(body, todo)
     p.set("docs", state="done", note=f"{len(seen)} docs")
+
+
+# What `drive +list-comments --type` will name. A type outside this set is not a soft
+# failure: Drive answers 1069307, the same code that means "no such token", and the caller
+# remembers that as "has no comments" forever. `mindnote` is deliberately absent -- the
+# endpoint does not name it, and asking as `docx` instead is the closest thing available.
+DOC_TYPES = {"doc", "docx", "sheet", "file", "slides", "bitable", "base", "apps", "wiki"}
+
+
+def _doc_type(meta: dict) -> str:
+    """What Drive should be asked to recognise this token as.
+
+    A wiki node calls it `obj_type` and a search hit calls it `doc_types`, in upper case;
+    the two never appear on the same record. Measured with real tokens of each kind: asked
+    as itself every one answers, asked as `docx` every one answers 1069307.
+
+    `comment_type` overrides both, and only the search loop sets it: a wiki hit whose node
+    token it could not resolve is addressed as `wiki`, because that is the only name Drive
+    has for it. It is not a property of the document -- the same document resolved answers
+    as its own type and answers 131005 as `wiki` -- so it cannot be derived here.
+    """
+    kind = str(meta.get("comment_type") or meta.get("obj_type") or meta.get("doc_types") or meta.get("file_type") or "").lower()
+    return kind if kind in DOC_TYPES else "docx"
 
 
 def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:

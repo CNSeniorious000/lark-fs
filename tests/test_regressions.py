@@ -534,3 +534,60 @@ def test_a_sweep_cut_short_does_not_claim_its_window(tmp_path, monkeypatch):
 
     assert store.exists("docs/tok1/meta.yaml"), "the one query that answered was not written"
     assert swept_recently(store, "docs", 6) is False, "a sweep that lost 13 of 14 queries claimed its six hours"
+
+
+def test_every_document_kind_is_named_the_way_drive_names_it():
+    """A wiki node calls the type `obj_type`; a search hit calls it `doc_types`, upper case.
+    Only the first was read, so the 203 non-docx documents that search alone found were
+    still asked for as `docx` -- and Drive answers 1069307 for those, which is remembered
+    as "has no comments" forever. Measured with a real token of each kind: asked as itself
+    every one answers, asked as `docx` every one answers 1069307.
+
+    `mindnote` is the exception the endpoint does not name at all, so it falls back."""
+    from lark_fs.sync import _doc_type
+
+    assert _doc_type({"obj_type": "sheet"}) == "sheet", "the wiki node's own field was ignored"
+    assert _doc_type({"doc_types": "BITABLE"}) == "bitable", "a search hit's type was ignored"
+    assert _doc_type({"file_type": "SLIDES"}) == "slides"
+    assert _doc_type({"doc_types": "MINDNOTE"}) == "docx", "a type the endpoint cannot name must fall back, not be sent"
+    assert _doc_type({}) == "docx", "no type at all is the docx case this started as"
+
+
+def test_an_unresolved_wiki_hit_is_addressed_as_a_wiki_node(tmp_path, monkeypatch):
+    """A WIKI search hit carries a node token, and `_wiki_aliases` turns it into the
+    document's own -- but only for spaces whose node list is on disk. For the rest the node
+    token is all there is, and Drive answers 1069307 for it as the docx it wraps while
+    answering it as `wiki`. The reverse holds for a resolved token: `wiki` gets 131005.
+
+    Measured: 860 resolved hits answer as their own type, 19 unresolved ones only as
+    `wiki`, and neither addressing works for the other group -- so this cannot be a blanket
+    rule, and it is not something `_doc_type` can tell from the record alone."""
+    from lark_fs import sync as sync_module
+
+    asked: list[tuple[str, str]] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+fetch":
+            return {"document": {"content": "body"}}
+        asked.append((argv[argv.index("--token") + 1], argv[argv.index("--type") + 1]))
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("wiki/s1/nodes.yaml", [{"node_token": "node_known", "obj_token": "obj_1", "obj_type": "docx", "title": "resolved"}])
+
+    hits = [
+        {"entity_type": "WIKI", "title_highlighted": "resolved", "result_meta": {"token": "node_known", "doc_types": "DOCX", "url": ""}},
+        {"entity_type": "WIKI", "title_highlighted": "stranded", "result_meta": {"token": "node_orphan", "doc_types": "DOCX", "url": ""}},
+    ]
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter(hits))
+
+    run(sync_module.sync_docs(store, Progress(), queries=["q"]))
+
+    assert ("obj_1", "docx") in asked, f"a resolved hit must be asked for as its own type: {asked}"
+    assert ("node_orphan", "wiki") in asked, f"an unresolved node token is only known to Drive as a wiki: {asked}"
+
+
+async def _aiter(items):
+    for item in items:
+        yield item
