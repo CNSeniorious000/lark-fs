@@ -442,6 +442,52 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
     p.set("chats", state="done", note=f"{len(known)} chats")
 
 
+# Everything a roster carries about a person beyond their id. `localized_name` is the one
+# that matters: it holds the parenthesised alias that tells two same-named colleagues apart.
+PROFILE_FIELDS = ("localized_name", "enterprise_email", "email", "department", "p2p_chat_id", "is_activated")
+BATCH = 19  # one under the 20-match cap `+search-user` enforces, measured against resolvable ids
+
+
+async def sync_profiles(store: Store, p: Progress):
+    """Backfill profiles for users already on disk.
+
+    A roster gives one human-readable field, `name`, and it does not identify anyone: two
+    active 冯欢 share it exactly and differ only by the alias in `localized_name`.
+
+    `+search-user` caps at 20 *matches*, not 20 ids, and does not paginate -- 20 resolvable
+    ids come back as 20 rows with `has_more`, 19 as 19 without one. BATCH stays under the
+    cap so the cap is never reached and there is nothing to page past.
+    Only own-tenant users are asked for; external ids do not resolve and would spend the
+    quota for nothing.
+    """
+    p.set("profiles", state="running")
+    tenant = (((await cli.run("contact", "+get-user")) or {}).get("user") or {}).get("tenant_key")
+    on_disk = {d.name: store.read_yaml(f"users/{d.name}/meta.yaml") for d in (store.root / "users").glob("ou_*")}
+    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and "localized_name" not in u]
+    p.set("profiles", total=len(todo), note=f"{len(on_disk)} known")
+    if not todo:
+        p.set("profiles", state="done", note="up to date")
+        return
+
+    resolved = 0
+
+    async def one(batch: list[str]):
+        nonlocal resolved
+        d = await cli.run("contact", "+search-user", "--user-ids", ",".join(batch), "--as", "user") or {}
+        rows = d.get("users") or []
+        for row in rows:
+            rel = f"users/{row['open_id']}/meta.yaml"
+            # a roster row is the richer one for name/member_id; only the profile-only fields are taken
+            store.write_yaml(rel, _clean({**store.read_yaml(rel), **{k: row[k] for k in PROFILE_FIELDS if k in row}}))
+        resolved += len(rows)
+        p.bump("profiles", len(batch))
+
+    await cli.spread(one, [todo[i : i + BATCH] for i in range(0, len(todo), BATCH)])
+    # the shortfall is deactivated accounts and bots, which never resolve and so are asked
+    # for on every run -- cheap enough at one request per 19, and they come back if rehired
+    p.set("profiles", state="done", note=f"{resolved}/{len(todo)} resolved")
+
+
 def _record_sender(store: Store, msg: dict, known: set[str]):
     """Senders carry their own name and open_id, so a usable user directory can be built
     from messages alone -- `+chat-members-list` needs im:chat:read, which may not be granted."""
@@ -819,7 +865,7 @@ async def sync_wiki(store: Store, p: Progress):
     p.set("wiki", state="done")
 
 
-ALL = ["messages", "chats", "docs", "minutes", "meetings", "bases", "wiki", "files"]
+ALL = ["messages", "chats", "profiles", "docs", "minutes", "meetings", "bases", "wiki", "files"]
 
 
 async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
@@ -857,6 +903,15 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
         # depends on the roster, not on the sweep, so a rate-limited sweep cannot take it down
         await sync_chat_meta(store, p, await roster if roster else set())
 
+    rosters = create_task(chats()) if "chats" in want else None
+
+    async def profiles():
+        # the roster pass is what puts users on disk; alone this backfills whoever is
+        # already there, which is what `--only profiles` is for
+        if rosters:
+            await rosters
+        await sync_profiles(store, p)
+
     async def docs():
         if wiki:
             await wiki
@@ -869,8 +924,8 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
             await messages
         await sync_attachments(store, p)
 
-    if "chats" in want:
-        tasks.append(chats())
+    if "profiles" in want:
+        tasks.append(profiles())
     if "docs" in want:
         tasks.append(docs())
     if "files" in want:
@@ -885,7 +940,7 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     # A producer is also awaited here. A task can be awaited more than once, so this costs
     # nothing and removes the need to keep "who else awaits this" in step with the graph --
     # get that wrong and the task is simply abandoned when gather returns.
-    tasks += [t for t in (roster, messages, wiki) if t]
+    tasks += [t for t in (roster, messages, wiki, rosters) if t]
 
     await gather(*tasks)
     store.save_cursors()

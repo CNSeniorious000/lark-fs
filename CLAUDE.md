@@ -29,6 +29,11 @@ the sync reports success. Confirm the shape with a real call before writing a sy
 Known traps, all hit in practice:
 
 - `minutes +search` caps `--page-size` at 30; 50 is a hard 400.
+- `contact +search-user --user-ids` caps at 20 *matches*, not 20 ids, and does not
+  paginate: 20 resolvable ids come back as 20 rows with `has_more: true`, 19 as 19 without
+  one, and 50 as the same 20. Batch under the cap — a capped batch has silently lost its
+  tail, and the shortfall is indistinguishable from ids that simply do not resolve
+  (deactivated accounts and bots return nothing at all).
 - `im +messages-search` caps at 40 pages (800 messages) per query however the window is
   sliced — it cannot mirror a conversation. `im +chat-messages-list` has no such ceiling
   and reaches the first message in a chat (2020 vs 2026-07 on the same chat), so messages
