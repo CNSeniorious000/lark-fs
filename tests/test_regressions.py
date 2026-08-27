@@ -725,3 +725,41 @@ def test_an_empty_body_is_not_an_empty_body_forever(tmp_path):
     store.write("docs/doc_1/.nobody", "")
     assert _doc_is_stale(store, "doc_1", {"update_time": later}) is True, "a docx edited after we saw it empty stayed empty on disk"
     assert _doc_is_stale(store, "doc_1", {"update_time": 1}) is False, "an untouched empty document was re-fetched anyway"
+
+
+def test_a_window_at_its_ceiling_is_split_not_accepted():
+    """`+search` caps the *total* a query returns, not a page, so a window that reaches the
+    cap is the first N of an unknown number -- the rest are unreachable through that query
+    however its pages are walked. A month was assumed narrow enough. Measured on disk: 159
+    meetings in 2026-07 and 152 in 2026-06, against a ceiling of 150."""
+    from lark_fs.sync import _sweep_window
+
+    # one busy day inside the range; every window overlapping it comes back at the ceiling
+    busy = datetime(2026, 7, 14, tzinfo=UTC)
+    asked: list[tuple[str, str]] = []
+
+    async def take(lo, hi):
+        asked.append((lo.strftime("%Y-%m-%d"), hi.strftime("%Y-%m-%d")))
+        return 150 if lo <= busy < hi else 3
+
+    run(_sweep_window(datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 8, 1, tzinfo=UTC), 150, take))
+
+    assert asked[0] == ("2026-07-01", "2026-08-01"), "the whole month should be tried first"
+    narrowest = min(asked, key=lambda w: datetime.fromisoformat(w[1]) - datetime.fromisoformat(w[0]))
+    assert (datetime.fromisoformat(narrowest[1]) - datetime.fromisoformat(narrowest[0])).days == 1, f"never narrowed to a day: {asked}"
+    assert all(a[0] != a[1] for a in asked), f"an empty window was queried: {asked}"
+
+
+def test_splitting_stops_where_the_api_stops():
+    """A single day that still fills the cap cannot be split finer -- `--start`/`--end` take
+    a date. Recursing past that is an infinite loop, not a smaller window."""
+    from lark_fs.sync import _sweep_window
+
+    asked = []
+
+    async def always_full(lo, hi):
+        asked.append((lo, hi))
+        return 150
+
+    run(_sweep_window(datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 7, 2, tzinfo=UTC), 150, always_full))
+    assert len(asked) == 1, f"a one-day window was split further: {asked}"

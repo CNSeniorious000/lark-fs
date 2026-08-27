@@ -7,7 +7,7 @@ they re-list metadata (cheap) but skip fetching bodies for entities already on d
 """
 
 from asyncio import create_task, gather
-from collections.abc import MutableMapping
+from collections.abc import Awaitable, Callable, MutableMapping
 from contextlib import aclosing
 from datetime import UTC, datetime, timedelta, timezone
 from itertools import islice
@@ -777,6 +777,29 @@ def _clean(value) -> Any:
     return value
 
 
+MINUTES_CAP = 50  # `+search` returns at most this many per query, however its pages are walked
+MEETINGS_CAP = 150
+
+
+async def _sweep_window(lo: datetime, hi: datetime, cap: int, take: Callable[[datetime, datetime], Awaitable[int]]):
+    """Walk [lo, hi) with `take`, halving any window that comes back at its ceiling.
+
+    The cap is on the *total* a query can return, not on a page, so a window that reaches it
+    is not an answer -- it is the first `cap` of an unknown number, and the rest cannot be
+    reached through that query at all. A month was assumed narrow enough; it is not.
+    Measured on disk: 159 meetings in 2026-07 and 152 in 2026-06, against a ceiling of 150.
+
+    Splitting stops at a day, which the busiest month on record puts at ~5 against 150.
+    """
+    if await take(lo, hi) < cap:
+        return
+    mid = (lo + (hi - lo) / 2).replace(hour=0, minute=0, second=0, microsecond=0)
+    if mid <= lo or mid >= hi:
+        return  # a single day that still fills the cap cannot be split any finer than the API accepts
+    await _sweep_window(lo, mid, cap, take)
+    await _sweep_window(mid, hi, cap, take)
+
+
 async def sync_minutes(store: Store, p: Progress, *, since: str = ""):
     """Minutes (妙记): metadata, AI summary, chapters, todos, and full transcript.
 
@@ -789,16 +812,26 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = ""):
     now = datetime.now(UTC)
     p.set("minutes", total=_months_between(month, now))
     scanned = 0
-    while month < now:
-        nxt = (month + timedelta(days=32)).replace(day=1)
+
+    async def take(lo: datetime, hi: datetime) -> int:
+        seen = 0
         try:
-            async for item in cli.paginate("minutes", "+search", "--start", month.strftime("%Y-%m-%d"), "--end", nxt.strftime("%Y-%m-%d"), key="items"):
+            async for item in cli.paginate("minutes", "+search", "--start", lo.strftime("%Y-%m-%d"), "--end", hi.strftime("%Y-%m-%d"), key="items"):
+                seen += 1
                 if token := item.get("token"):
                     found[token] = item
         except cli.LarkError as e:
             if not e.is_pagination_exhausted:
-                p.set("minutes", state="error", note=_reason(e))
-                return
+                raise
+        return seen
+
+    while month < now:
+        nxt = (month + timedelta(days=32)).replace(day=1)
+        try:
+            await _sweep_window(month, nxt, MINUTES_CAP, take)
+        except cli.LarkError as e:
+            p.set("minutes", state="error", note=_reason(e))
+            return
         scanned += 1
         p.set("minutes", done=scanned, note=f"scanning {month:%Y-%m} · {len(found)} found")
         month = nxt
@@ -838,27 +871,37 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = ""):
     Like minutes, `+search` has a per-query ceiling (150 here), so walk month by month.
     """
     p.set("meetings", state="running")
-    ids: list[str] = []
+    ids: set[str] = set()  # a window that splits is walked again from its start, so this cannot be a list
     month = _earliest(store, "meetings", since)
     now = datetime.now(UTC)
     p.set("meetings", total=_months_between(month, now))
     scanned = 0
-    while month < now:
-        nxt = (month + timedelta(days=32)).replace(day=1)
+
+    async def take(lo: datetime, hi: datetime) -> int:
+        seen = 0
         try:
-            async for item in cli.paginate("vc", "+search", "--start", month.strftime("%Y-%m-%d"), "--end", nxt.strftime("%Y-%m-%d"), key="items"):
+            async for item in cli.paginate("vc", "+search", "--start", lo.strftime("%Y-%m-%d"), "--end", hi.strftime("%Y-%m-%d"), key="items"):
+                seen += 1
                 if mid := item.get("id"):
-                    ids.append(mid)
+                    ids.add(mid)
                     store.write_yaml(f"meetings/{mid}/meta.yaml", _clean(item))
         except cli.LarkError as e:
             if not e.is_pagination_exhausted:
-                p.set("meetings", state="error", note=_reason(e))
-                return
+                raise
+        return seen
+
+    while month < now:
+        nxt = (month + timedelta(days=32)).replace(day=1)
+        try:
+            await _sweep_window(month, nxt, MEETINGS_CAP, take)
+        except cli.LarkError as e:
+            p.set("meetings", state="error", note=_reason(e))
+            return
         scanned += 1
         p.set("meetings", done=scanned, note=f"scanning {month:%Y-%m} · {len(ids)} found")
         month = nxt
 
-    todo = [i for i in ids if not store.exists(f"meetings/{i}/detail.yaml")]
+    todo = [i for i in sorted(ids) if not store.exists(f"meetings/{i}/detail.yaml")]
     p.set("meetings", done=0, total=len(todo), note=f"fetching details · {len(ids)} meetings")
 
     async def details(batch: list[str]):
