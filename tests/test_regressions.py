@@ -232,3 +232,25 @@ def test_the_roster_pass_does_not_wait_out_the_message_sweep(tmp_path, monkeypat
     order = _graph_probe(monkeypatch)
     run(sync_all(tmp_path, Progress(), ["messages", "chats"]))
     assert order.index("chats:done") < order.index("messages:done"), f"roster pass waited for the sweep: {order}"
+
+
+def test_an_unnamed_image_is_named_by_its_bytes(tmp_path):
+    """Rich-text images carry no filename, so the mirror stores them under the bare key --
+    `fd -e jpg` misses them and nothing opens them. Lark reports no content type either,
+    and the key says `img_` without saying which kind, so the bytes are the only source."""
+    dest = tmp_path / "img_v3_abc"
+    dest.mkdir()
+    saved = dest / "img_v3_abc"
+    saved.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 20)  # the JPEG one measured on a real post image
+    assert _settle(dest, {"saved_path": str(saved), "size_bytes": 24}, 1_000) is True
+    assert (dest / "img_v3_abc.jpg").is_file(), sorted(p.name for p in dest.iterdir())
+
+
+def test_a_named_attachment_keeps_the_name_lark_gave_it(tmp_path):
+    """Sniffing must not rewrite a filename the sender chose; `.md` stays `.md`."""
+    dest = tmp_path / "file_v3_abc"
+    dest.mkdir()
+    saved = dest / "notes.md"
+    saved.write_bytes(b"# hi\n")
+    _settle(dest, {"saved_path": str(saved), "size_bytes": 5}, 1_000)
+    assert (dest / "notes.md").is_file()

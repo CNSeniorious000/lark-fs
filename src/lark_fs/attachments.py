@@ -86,16 +86,33 @@ def _dir(store: Store, row: dict) -> Path:
     return store.root / f"chats/{row['chat_id']}/files/{row['key']}"
 
 
+def _suffix_for(head: bytes) -> str:
+    """Lark's rich-text images arrive with no filename and no content type, and the key
+    says `img_` without saying which kind, so the bytes are the only thing that knows."""
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head.startswith(b"GIF8"):
+        return ".gif"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return ".webp"
+    return ""
+
+
 def _settle(dest: Path, data: dict, cap: int) -> bool:
     """Discard an attachment that turned out to be too big; True when it was kept."""
     saved = Path(data.get("saved_path") or "")
-    if (size := data.get("size_bytes", 0)) <= cap or not saved.is_file():
-        return True
-    saved.unlink()
-    # the marker carries the size that disqualified it, so raising max_mb brings it back;
-    # a bare marker would make the first cap that rejected a file the permanent one
-    (dest / OVERSIZE).write_text(str(size))
-    return False
+    if (size := data.get("size_bytes", 0)) > cap and saved.is_file():
+        saved.unlink()
+        # the marker carries the size that disqualified it, so raising max_mb brings it back;
+        # a bare marker would make the first cap that rejected a file the permanent one
+        (dest / OVERSIZE).write_text(str(size))
+        return False
+    if saved.is_file() and not saved.suffix and (suffix := _suffix_for(saved.read_bytes()[:12])):
+        # named by the key alone it is neither openable nor reachable by `fd -e jpg`
+        saved.rename(saved.with_name(saved.name + suffix))
+    return True
 
 
 def _settled(d: Path, cap: int) -> bool:
