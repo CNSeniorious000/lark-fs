@@ -44,7 +44,8 @@ def main():
     if args.command == "reindex":
         counts = reindex(args.root)
         broken = f", {counts['unreadable']} unreadable" if counts["unreadable"] else ""
-        print(f"  scanned {counts['messages']} messages -> {counts['users']} users, {counts['media']} media refs{broken}")
+        moved = f"  split {counts['threads_split']} threads into one file per message\n" if counts["threads_split"] else ""
+        print(f"{moved}  scanned {counts['messages']} messages -> {counts['users']} users, {counts['media']} media refs{broken}")
         print_summary(Store(args.root))
         return
     if args.command == "watch":

@@ -7,8 +7,9 @@ from re import findall
 
 from lark_fs import cli
 from lark_fs.attachments import Policy, _pending, _settle
+from lark_fs.reindex import reindex
 from lark_fs.store import Store
-from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _note_tenant, _wiki_aliases, _windows
+from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _note_tenant, _wiki_aliases, _windows, _write_thread, migrate_threads
 from lark_fs.yaml import readable_yaml_dumps
 
 
@@ -254,3 +255,69 @@ def test_a_named_attachment_keeps_the_name_lark_gave_it(tmp_path):
     saved.write_bytes(b"# hi\n")
     _settle(dest, {"saved_path": str(saved), "size_bytes": 5}, 1_000)
     assert (dest / "notes.md").is_file()
+
+
+def _nested_thread() -> dict:
+    """A thread as Lark hands it over: the root, with every reply inlined."""
+    return {
+        "message_id": "om_root",
+        "chat_id": "oc_1",
+        "thread_id": "omt_1",
+        "create_time": "2026-08-24 23:04",
+        "content": "Effect why slower",
+        "sender": {"id": "ou_root", "id_type": "open_id", "name": "a"},
+        "thread_replies": [
+            {"message_id": "om_r1", "chat_id": "oc_1", "create_time": "2026-08-24 23:47", "content": "rust?", "sender": {"id": "ou_r1", "id_type": "open_id", "name": "b"}},
+            {"message_id": "om_r2", "chat_id": "oc_1", "create_time": "2026-08-24 23:48", "content": "![Image](img_v3_deep)", "sender": {"id": "ou_r1", "id_type": "open_id", "name": "b"}},
+        ],
+    }
+
+
+def test_every_thread_reply_gets_its_own_file(tmp_path):
+    """Stored as one nested blob, a reply has no file named by its id -- and `fd <message_id>`
+    is the mirror's primary query interface. Measured before this: 49308 such replies."""
+    store = Store(tmp_path)
+    _write_thread(store, "oc_1", "omt_1", _nested_thread())
+    for mid in ("om_root", "om_r1", "om_r2"):
+        assert store.exists(f"chats/oc_1/threads/omt_1/{mid}.yaml"), mid
+    assert "thread_replies" not in store.read_yaml("chats/oc_1/threads/omt_1/om_root.yaml"), "the root must not keep a second copy"
+    assert store.read_yaml("chats/oc_1/threads/omt_1/meta.yaml")["replies"] == 2
+
+
+def test_the_root_keeps_its_own_id_as_a_filename(tmp_path):
+    """A thread root is never also written under messages/ (measured: 0 of 400), so naming
+    its file meta.yaml would put 16717 real messages out of reach of `fd`."""
+    store = Store(tmp_path)
+    _write_thread(store, "oc_1", "omt_1", _nested_thread())
+    assert store.read_yaml("chats/oc_1/threads/omt_1/om_root.yaml")["message_id"] == "om_root"
+
+
+def test_migration_reaches_replies_the_projections_never_saw(tmp_path):
+    """The sweep only revisits a chat from its cursor forward, so replies already on disk
+    would stay invisible forever. Migration runs first and the same pass then indexes them:
+    3254 attachment keys and 912 people were missing from a real mirror."""
+    store = Store(tmp_path)
+    store.write_yaml("chats/oc_1/threads/omt_1/om_root.yaml", _nested_thread())  # the old shape
+    counts = reindex(tmp_path)
+    assert counts["threads_split"] == 1
+    assert store.exists("users/ou_r1/meta.yaml"), "a reply's sender was never in users/"
+    assert "img_v3_deep" in {r["key"] for r in store.glob_rows("chats/*/media.yaml")}, "a reply's attachment was never indexed"
+
+
+def test_migration_does_not_reparse_an_already_split_store(tmp_path):
+    """It runs at the head of every sync, so a store that is already split must cost a stat
+    per thread rather than a parse of every message in it."""
+    store = Store(tmp_path)
+    _write_thread(store, "oc_1", "omt_1", _nested_thread())
+    assert migrate_threads(store) == 0
+
+
+def test_a_thread_with_no_replies_still_gets_its_marker(tmp_path):
+    """meta.yaml is what the migration scan short-circuits on, and it runs at the head of
+    every sync. A thread that never earns one is re-parsed forever: the 4677 unreplied
+    threads in a real mirror were 3.6s of the 3.7s an already-migrated store paid."""
+    store = Store(tmp_path)
+    store.write_yaml("chats/oc_1/threads/omt_2/om_lonely.yaml", {"message_id": "om_lonely", "chat_id": "oc_1", "thread_id": "omt_2", "content": "no replies"})
+    assert migrate_threads(store) == 0, "nothing was split -- it had no replies to split"
+    assert store.exists("chats/oc_1/threads/omt_2/meta.yaml"), "but it must still be marked, or it is re-read every sync"
+    assert migrate_threads(store) == 0

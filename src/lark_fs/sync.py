@@ -154,12 +154,15 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
             if not (mid := msg.get("message_id")):
                 continue
             created = msg.get("create_time", "")
-            thread = msg.get("thread_id")
-            rel = f"chats/{chat_id}/threads/{thread}/{mid}.yaml" if thread else f"chats/{chat_id}/messages/{created[:7] or 'unknown'}/{mid}.yaml"
-            store.write_yaml(rel, _clean(msg))
-            media.extend(_index_media(msg))
-            _record_sender(store, msg, users)
-            total += 1
+            if thread := msg.get("thread_id"):
+                written = _write_thread(store, chat_id, thread, msg)
+            else:
+                store.write_yaml(f"chats/{chat_id}/messages/{created[:7] or 'unknown'}/{mid}.yaml", _clean(msg))
+                written = [msg]
+            for one_msg in written:  # a thread arrives as one item but is many messages
+                media.extend(_index_media(one_msg))
+                _record_sender(store, one_msg, users)
+            total += len(written)
             newest = max(newest, created)
             if total % 20 == 0:
                 sender = (msg.get("sender") or {}).get("name") or ""
@@ -243,6 +246,66 @@ def _flush_media(store: Store, rows: list[dict]):
         rel = f"chats/{chat_id}/media.yaml"
         merged = {r["key"]: r for r in store.read_yaml_rows(rel)} | {r["key"]: r for r in new}
         store.write_yaml(rel, sorted(merged.values(), key=lambda r: r["create_time"]))
+
+
+def _thread_meta(root: dict, replies: list[dict]) -> dict:
+    """The thread's own identity, so the directory is not merely a bag of messages.
+
+    The root keeps its own `<message_id>.yaml` like every other message: thread roots are
+    never also written under `messages/` (measured: 0 of 400), so naming the root file
+    meta.yaml would put 16717 real messages out of reach of `fd <message_id>`.
+    """
+    return {
+        "thread_id": root.get("thread_id", ""),
+        "chat_id": root.get("chat_id", ""),
+        "root_message_id": root.get("message_id", ""),
+        "replies": len(replies),
+        "create_time": root.get("create_time", ""),
+        "last_reply": max((r.get("create_time") or "" for r in replies), default=root.get("create_time", "")),
+        "link": root.get("message_app_link", ""),
+    }
+
+
+def _write_thread(store: Store, chat_id: str, thread: str, msg: dict) -> list[dict]:
+    """Store a thread as one file per message. Returns every message, for the projections.
+
+    Lark hands a thread over as its root with every reply nested inside it. Written that
+    way a reply has no file of its own, so `fd <message_id>` cannot find it -- and
+    `_index_media` and `_record_sender` read one message's *own* fields, so neither ever
+    sees one. Measured on a full mirror before this: 49308 replies, carrying 3254
+    attachment keys and 912 people, none of them in any index.
+    """
+    replies = msg.get("thread_replies") or []
+    root = {k: v for k, v in msg.items() if k != "thread_replies"}
+    at = f"chats/{chat_id}/threads/{thread}"
+    store.write_yaml(f"{at}/meta.yaml", _thread_meta(root, replies))
+    for m in (root, *replies):
+        store.write_yaml(f"{at}/{m['message_id']}.yaml", _clean(m))
+    return [root, *replies]
+
+
+def migrate_threads(store: Store) -> int:
+    """Split threads written as one nested blob into one file per message.
+
+    Runs at the head of every sync, because a store synced by an older version has those
+    replies on disk and nothing else will ever look at them again -- the sweep only
+    revisits a chat from its cursor forward.
+
+    Every thread directory ends up with a meta.yaml, including one whose thread has no
+    replies at all. That file is what this scan short-circuits on, and a thread that never
+    earned one is re-read on every single sync: measured on a real mirror, the 4677
+    unreplied threads were 3.6s of the 3.7s an already-migrated store was paying.
+    """
+    split = 0
+    for at in sorted(store.root.glob("chats/*/threads/*")):
+        if (at / "meta.yaml").exists():
+            continue
+        messages = [store.read_yaml(str(p.relative_to(store.root))) for p in sorted(at.glob("*.yaml"))]
+        nested = [m for m in messages if m.get("thread_replies")]
+        if root := (nested or messages or [{}])[0]:
+            _write_thread(store, at.parents[1].name, at.name, root)
+            split += bool(nested)
+    return split
 
 
 def _index_media(msg: dict) -> list[dict]:
@@ -688,6 +751,7 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     """
     store = Store(root)
     _learn_tenant(store)
+    migrate_threads(store)
     want = set(only or ALL)
     tasks = []
 
