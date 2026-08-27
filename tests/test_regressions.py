@@ -974,3 +974,50 @@ def test_a_media_row_can_be_opened_in_feishu():
     )[0]
     assert row["link"] == "https://applink.feishu.cn/client/chat/open?openChatId=oc_1&position=42", f"the media row cannot be opened: {row}"
     assert row["key"] == "file_v3_001_abc" and row["name"] == "notes.md"
+
+
+def test_a_month_already_walked_is_not_walked_again_every_sync(tmp_path, monkeypatch):
+    """History does not grow backwards, so re-listing every month on every sync spends
+    requests to learn nothing: 102 of one sync's 435 requests were the minutes walk and 57
+    the meetings walk, 36% of the run. Only this month and the last can still change. The
+    full walk stays on a clock, for a late entry that lands further back."""
+    from lark_fs import sync as sync_module
+
+    windows: list[str] = []
+
+    async def listing(*argv, **_k):
+        windows.append(argv[argv.index("--start") + 1])
+        return
+        yield
+
+    monkeypatch.setattr(cli, "paginate", listing)
+    monkeypatch.setattr(cli, "run", lambda *_a, **_k: _done({}))
+    store = Store(tmp_path)
+    store.write_yaml("minutes/obc_1/meta.yaml", {"display_info": "开始时间: 2024.01.15 10:00"})
+
+    run(sync_module.sync_minutes(store, Progress(), full=True))
+    assert min(windows).startswith("2023-12"), f"a full walk must reach the start of history: {min(windows)}"
+    assert len(windows) > 12, f"a full walk from 2023-12 is more than a year of windows: {len(windows)}"
+
+    windows.clear()
+    run(sync_module.sync_minutes(store, Progress(), full=False))
+    assert len(windows) == 2, f"a recent walk is this month and the last, not {len(windows)} windows"
+
+
+def test_the_full_walk_is_what_claims_the_clock(tmp_path, monkeypatch):
+    """A recent walk has not covered history, so it must not let the full one coast."""
+    from lark_fs import sync as sync_module
+
+    async def nothing(*_a, **_k):
+        return
+        yield
+
+    monkeypatch.setattr(cli, "paginate", nothing)
+    monkeypatch.setattr(cli, "run", lambda *_a, **_k: _done({}))
+    store = Store(tmp_path)
+
+    run(sync_module.sync_minutes(store, Progress(), full=False))
+    assert swept_recently(store, "minutes", 6) is False, "a two-month walk claimed the window a full one is due for"
+
+    run(sync_module.sync_minutes(store, Progress(), full=True))
+    assert swept_recently(store, "minutes", 6) is True

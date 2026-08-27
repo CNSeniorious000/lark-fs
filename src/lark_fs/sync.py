@@ -45,6 +45,18 @@ def _earliest(store: Store, collection: str, since: str) -> datetime:
     return (datetime.fromisoformat(f"{min(months)}-01").replace(tzinfo=UTC) - timedelta(days=1)).replace(day=1)
 
 
+def _recent(now: datetime) -> datetime:
+    """The start of last month.
+
+    A month already walked cannot gain entries -- history does not grow backwards -- so
+    re-listing all of it on every sync spends requests to learn nothing. Measured: 102 of
+    one sync's 435 requests were the minutes walk and 57 were the meetings walk, 36% of the
+    run. Only the current month and the one before it can still change, and the full walk
+    stays on a clock for the case a late entry lands further back.
+    """
+    return (now.replace(day=1) - timedelta(days=1)).replace(day=1)
+
+
 def _months_between(start: datetime, end: datetime) -> int:
     return (end.year - start.year) * 12 + end.month - start.month + 1
 
@@ -851,7 +863,7 @@ async def _sweep_window(lo: datetime, hi: datetime, cap: int, take: Callable[[da
     await _sweep_window(mid, hi, cap, take)
 
 
-async def sync_minutes(store: Store, p: Progress, *, since: str = ""):
+async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool = True):
     """Minutes (妙记): metadata, AI summary, chapters, todos, and full transcript.
 
     `+search` caps at 50 results per query no matter the filters, so a single call over
@@ -859,8 +871,8 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = ""):
     """
     p.set("minutes", state="running")
     found: dict[str, dict] = {}
-    month = _earliest(store, "minutes", since)
     now = datetime.now(UTC)
+    month = _earliest(store, "minutes", since) if full else _recent(now)
     p.set("minutes", total=_months_between(month, now))
     scanned = 0
 
@@ -913,18 +925,20 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = ""):
                 store.write(f"minutes/{token}/summary.md", summary if isinstance(summary, str) else str(summary))
 
     await cli.spread(detail, todo)
+    if full:
+        record_sweep(store, "minutes")
     p.set("minutes", state="done", note=f"{len(found)} minutes")
 
 
-async def sync_meetings(store: Store, p: Progress, *, since: str = ""):
+async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: bool = True):
     """VC meeting records; links each meeting to its minute_token and note_id.
 
     Like minutes, `+search` has a per-query ceiling (150 here), so walk month by month.
     """
     p.set("meetings", state="running")
     ids: set[str] = set()  # a window that splits is walked again from its start, so this cannot be a list
-    month = _earliest(store, "meetings", since)
     now = datetime.now(UTC)
+    month = _earliest(store, "meetings", since) if full else _recent(now)
     p.set("meetings", total=_months_between(month, now))
     scanned = 0
 
@@ -966,6 +980,8 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = ""):
             store.write_yaml(f"meetings/{m['meeting_id']}/detail.yaml", _clean(m))
 
     await cli.spread(details, [todo[i : i + 20] for i in range(0, len(todo), 20)])
+    if full:
+        record_sweep(store, "meetings")
     p.set("meetings", state="done", note=f"{len(ids)} meetings")
 
 
@@ -1177,9 +1193,9 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     if "files" in want:
         tasks.append(files())
     if "minutes" in want:
-        tasks.append(sync_minutes(store, p))
+        tasks.append(sync_minutes(store, p, full="minutes" in asked or not swept_recently(store, "minutes", SEARCH_HOURS)))
     if "meetings" in want:
-        tasks.append(sync_meetings(store, p))
+        tasks.append(sync_meetings(store, p, full="meetings" in asked or not swept_recently(store, "meetings", SEARCH_HOURS)))
     if "bases" in want:
         tasks.append(sync_bases(store, p))
 
