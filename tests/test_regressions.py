@@ -1250,3 +1250,23 @@ def test_a_deliberate_stop_still_stops(tmp_path, monkeypatch):
 
     with pytest.raises(cli.SyncAbortedError):
         run(sync_module.sync_all(tmp_path, Progress()))
+
+
+def test_reindex_notices_a_file_it_cannot_read_anywhere_in_the_store(tmp_path):
+    """The scan rebuilds projections from messages, so messages are all it looked at. Five
+    `docs/*/comments.yaml` -- written by a serializer that could not round-trip a block
+    scalar whose first line was blank and more indented than its content -- sat unreadable
+    with nothing in the mirror to say so. A message has `messages_unreadable` to get it
+    refetched; these had no equivalent, so noticing is the whole protection."""
+    store = Store(tmp_path)
+    month = datetime.now(UTC).strftime("%Y-%m")
+    store.write_yaml(f"chats/oc_1/messages/{month}/om_1.yaml", {"message_id": "om_1", "content": ""})
+    # the exact shape, from `docs/Ngo1dvaFLoSkUYxfHP5cGu5QnPb/comments.yaml`: a block scalar
+    # opened without an indentation indicator whose first line is blank and deeper than the
+    # line after it, which ends the block early and leaves the rest as a stray mapping
+    store.write("docs/tok_1/comments.yaml", "items:\n  - text: |-\n         \n      邀请你进项目了\n")
+
+    assert reindex(tmp_path)["damaged"] == 1, "a file the mirror cannot read back went unreported"
+
+    store.write_yaml("docs/tok_1/comments.yaml", {"items": [{"text": "   \n邀请你进项目了"}]})
+    assert reindex(tmp_path)["damaged"] == 0, "a file the current serializer wrote was called damaged"

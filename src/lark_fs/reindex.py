@@ -41,4 +41,23 @@ def reindex(root: Path) -> dict[str, int]:
     # this scan takes minutes; a full save would write back the snapshot it loaded at the
     # start, undoing every cursor a sync advanced while it ran
     store.save_cursor("messages_unreadable")
-    return {"messages": scanned, "users": len(known), "media": len(media), "unreadable": len(unreadable), "threads_split": split}
+    return {"messages": scanned, "users": len(known), "media": len(media), "unreadable": len(unreadable), "threads_split": split, "damaged": len(_damaged(root))}
+
+
+def _damaged(root: Path) -> list[Path]:
+    """Every file in the store this mirror can no longer read back.
+
+    The loop above only reaches messages, because that is what it rebuilds projections
+    from. Nothing looked at the rest -- and five `docs/*/comments.yaml`, written by a
+    serializer that could not round-trip a block scalar whose first line was blank and
+    more indented than its content, sat unreadable with nothing to say so. A message has
+    `messages_unreadable` to get it refetched; these had no equivalent, so the only
+    protection is noticing.
+    """
+    out = []
+    for f in root.rglob("*.yaml"):
+        try:
+            safe_load(f.read_text())
+        except YAMLError, UnicodeDecodeError:
+            out.append(f)
+    return out
