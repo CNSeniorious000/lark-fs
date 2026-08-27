@@ -10,8 +10,8 @@ from lark_fs import cli
 from lark_fs.attachments import Policy, _pending, _settle
 from lark_fs.reindex import reindex
 from lark_fs.store import Store
-from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _note_tenant, _wiki_aliases, _windows, _write_thread, migrate_threads
-from lark_fs.yaml import readable_yaml_dumps
+from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _edit_signal, _index_media, _note_tenant, _wiki_aliases, _windows, _write_thread, migrate_threads
+from lark_fs.yaml import JSON, readable_yaml_dumps
 
 
 def _schedule(mode: str, seconds: float = 1.5) -> dict[str, int]:
@@ -87,11 +87,17 @@ def test_yaml_round_trips_every_character_a_message_can_carry():
     Nothing may be dropped to achieve that: this used to delete control characters and
     U+2028 outright, which parses cleanly and silently returns a different message than
     the one that was sent. A double-quoted scalar carries them as escapes instead."""
+    # Nesting is not decoration here: a block scalar's indentation indicator counts from
+    # its parent node, so a serializer that writes the absolute column is right at the top
+    # level and wrong everywhere else. Messages live two levels down, inside a thread.
     for name, value in NASTY.items():
-        text = readable_yaml_dumps({"body": value, "after": "sentinel"})
-        loaded = safe_load(text)
-        assert loaded["body"] == value, f"{name}: {loaded['body']!r} != {value!r}"
-        assert loaded["after"] == "sentinel", f"{name}: the document was restructured"
+        shapes: list[JSON] = [{"body": value, "after": "sentinel"}, {"thread": [{"body": value, "after": "sentinel"}]}, {"a": {"b": {"body": value, "after": "sentinel"}}}]
+        for shape in shapes:
+            loaded = safe_load(readable_yaml_dumps(shape))
+            got = loaded.get("body") or (loaded.get("thread") or [{}])[0].get("body") or loaded.get("a", {}).get("b", {}).get("body")
+            here = loaded if "body" in loaded else (loaded["thread"][0] if "thread" in loaded else loaded["a"]["b"])
+            assert got == value, f"{name} at depth {len(str(shape))}: {got!r} != {value!r}"
+            assert here["after"] == "sentinel", f"{name}: the document was restructured"
 
 
 def test_store_reads_back_what_it_wrote(tmp_path):
@@ -368,3 +374,12 @@ def test_a_whole_thread_is_not_put_on_the_repair_list(tmp_path):
     _write_thread(store, "oc_1", "omt_1", _nested_thread())
     assert not store.cursors.get("threads_incomplete")
     assert store.read_yaml("chats/oc_1/threads/omt_1/meta.yaml")["has_more"] is False
+
+
+def test_a_message_body_is_not_always_a_string():
+    """One real message is a 48-digit number, which the API hands over as a JSON number.
+    It round-trips as an int, and every reader that treats a body as text crashed on it --
+    taking down a reindex over the whole store, thousands of messages later."""
+    msg = {"message_id": "om_1", "chat_id": "oc_1", "content": 147399225000731836122715425445934994596181150067}
+    assert _index_media(msg) == []
+    assert _edit_signal(msg) == ("", "147399225000731836122715425445934994596181150067", False)

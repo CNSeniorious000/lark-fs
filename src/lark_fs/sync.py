@@ -227,18 +227,11 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         store.save_cursors()
 
     async def rewrite(chunk: list[tuple[str, str]]):
-        """Re-fetch messages whose file on disk cannot be parsed, and write them again."""
-        try:
-            data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(mid for mid, _ in chunk), "--no-reactions")
-        except cli.LarkError:
-            return  # stays on the list
-        returned = {m["message_id"]: m for m in (data or {}).get("messages") or []}
-        for mid, rel in chunk:
-            if msg := returned.get(mid):
-                store.write_yaml(rel, _clean(msg))
-                media.extend(_index_media(msg))
-                _record_sender(store, msg, users)
-            broken.pop(mid, None)  # a message the server no longer has is not coming back
+        for msg in await repair_unreadable(store, chunk):
+            media.extend(_index_media(msg))
+            _record_sender(store, msg, users)
+        for mid, _ in chunk:
+            broken.pop(mid, None)  # a message the server no longer has is not coming back either
         p.set("messages", note=f"{total} messages, {len(broken)} unreadable files left")
 
     # The file is on disk but unparseable, so only the API still holds the real content.
@@ -375,6 +368,29 @@ async def repair_thread(store: Store, thread: str, chat: str) -> list[dict]:
     return replies
 
 
+async def repair_unreadable(store: Store, chunk: list[tuple[str, str]]) -> list[dict]:
+    """Re-fetch messages whose file on disk cannot be parsed, and write them again.
+
+    A file written by a serializer that could not round-trip its content is on disk and
+    says nothing readable, so the API is the only place the message still exists. Takes
+    (message_id, relative path) pairs, at most 50 -- what `+messages-mget` accepts.
+
+    Returns what came back, for the caller to index. A message the server no longer has
+    simply does not come back, and no amount of retrying will change that.
+    """
+    try:
+        data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(mid for mid, _ in chunk), "--no-reactions")
+    except cli.LarkError:
+        return []
+    returned = {m["message_id"]: m for m in (data or {}).get("messages") or []}
+    written = []
+    for mid, rel in chunk:
+        if msg := returned.get(mid):
+            store.write_yaml(rel, _clean(msg))
+            written.append(msg)
+    return written
+
+
 def _index_media(msg: dict) -> list[dict]:
     """Collect media references as keys/URLs. Bytes are never downloaded."""
     rows = [
@@ -386,7 +402,9 @@ def _index_media(msg: dict) -> list[dict]:
             "chat_id": msg.get("chat_id"),
             "create_time": msg.get("create_time", ""),
         }
-        for img, md, key, name in RE_MEDIA.findall(msg.get("content") or "")
+        # a message body is not always a string: one real message is a 48-digit number, and
+        # `cli.oneline` already coerces for the same reason
+        for img, md, key, name in RE_MEDIA.findall(str(msg.get("content") or ""))
     ]
     return rows
 
@@ -530,7 +548,7 @@ def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
 
 def _edit_signal(msg: dict) -> tuple:
     """What actually changes when a message is edited."""
-    return (msg.get("update_time") or "", msg.get("content") or "", bool(msg.get("updated")))
+    return (msg.get("update_time") or "", str(msg.get("content") or ""), bool(msg.get("updated")))
 
 
 async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, batch: int = 50):

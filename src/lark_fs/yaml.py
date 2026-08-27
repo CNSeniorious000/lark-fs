@@ -140,6 +140,11 @@ def _append_literal_block(value: str, lines: list[str], indent: int):
     ends there -- mid-message, with the rest of the file read as the enclosing mapping.
     Two real messages did this, both starting with a space; the parse error lands several
     lines later, which is why it reads as corruption rather than as a quoting bug.
+
+    The indicator counts from the *parent node*, not from column zero, and every caller
+    here opens exactly one level -- so it is always 2. Writing the absolute indent instead
+    works at the top level and fails everywhere else, which is exactly what a test that
+    never nests will not catch.
     """
     block_prefix = "  " * indent
 
@@ -159,7 +164,7 @@ def _append_literal_block(value: str, lines: list[str], indent: int):
         chomp = "+"
         stripped_value = value
 
-    explicit = str(len(block_prefix)) if stripped_value.startswith(" ") else ""
+    explicit = "2" if stripped_value.startswith(" ") else ""
     lines.append(f" |{explicit}{chomp}\n")
 
     # Output content lines
