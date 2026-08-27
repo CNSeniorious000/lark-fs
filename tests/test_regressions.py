@@ -321,3 +321,23 @@ def test_a_thread_with_no_replies_still_gets_its_marker(tmp_path):
     assert migrate_threads(store) == 0, "nothing was split -- it had no replies to split"
     assert store.exists("chats/oc_1/threads/omt_2/meta.yaml"), "but it must still be marked, or it is re-read every sync"
     assert migrate_threads(store) == 0
+
+
+def test_a_truncated_thread_is_remembered_for_repair(tmp_path):
+    """A chat listing inlines at most 50 replies and sets `thread_has_more`. The sweep
+    moves its cursor past that chat and never returns, so a thread that is not written
+    down here keeps its missing replies forever -- 57 threads in a real mirror, one of
+    them short by 14."""
+    store = Store(tmp_path)
+    msg = {"message_id": "om_root", "chat_id": "oc_1", "thread_id": "omt_1", "thread_has_more": True, "thread_replies": [{"message_id": "om_r1", "chat_id": "oc_1"}]}
+    _write_thread(store, "oc_1", "omt_1", msg)
+    assert store.cursors["threads_incomplete"] == {"omt_1": "oc_1"}
+    assert store.read_yaml("chats/oc_1/threads/omt_1/meta.yaml")["has_more"] is True
+
+
+def test_a_whole_thread_is_not_put_on_the_repair_list(tmp_path):
+    """Every thread would otherwise be re-fetched through the slower per-thread endpoint."""
+    store = Store(tmp_path)
+    _write_thread(store, "oc_1", "omt_1", _nested_thread())
+    assert not store.cursors.get("threads_incomplete")
+    assert store.read_yaml("chats/oc_1/threads/omt_1/meta.yaml")["has_more"] is False

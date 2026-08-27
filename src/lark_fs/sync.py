@@ -209,6 +209,23 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         p.bump("messages")
 
     await cli.spread(one, sorted(known))
+
+    async def repair(item: tuple[str, str]):
+        # a truncated thread has at least 50 replies, so an empty answer is a failed fetch:
+        # leave it on the list rather than recording it as repaired
+        if replies := await repair_thread(store, *item):
+            for r in replies:
+                media.extend(_index_media(r))
+                _record_sender(store, r, users)
+            cut.pop(item[0], None)
+        p.set("messages", note=f"{total} messages, {len(cut)} truncated threads left")
+
+    # A chat listing inlines at most 50 replies per thread; only this list remembers which
+    # threads owe more, because the sweep will not pass them again -- the cursor moved on.
+    if cut := store.cursors.get("threads_incomplete") or {}:
+        await cli.spread(repair, sorted(cut.items()))
+        store.save_cursors()
+
     _flush_media(store, media)
     p.set("messages", state="done", note=f"{total} messages across {len(known)} chats")
     return known
@@ -260,6 +277,7 @@ def _thread_meta(root: dict, replies: list[dict]) -> dict:
         "chat_id": root.get("chat_id", ""),
         "root_message_id": root.get("message_id", ""),
         "replies": len(replies),
+        "has_more": bool(root.get("thread_has_more")),
         "create_time": root.get("create_time", ""),
         "last_reply": max((r.get("create_time") or "" for r in replies), default=root.get("create_time", "")),
         "link": root.get("message_app_link", ""),
@@ -281,6 +299,11 @@ def _write_thread(store: Store, chat_id: str, thread: str, msg: dict) -> list[di
     store.write_yaml(f"{at}/meta.yaml", _thread_meta(root, replies))
     for m in (root, *replies):
         store.write_yaml(f"{at}/{m['message_id']}.yaml", _clean(m))
+    if root.get("thread_has_more"):
+        # `+chat-messages-list` inlines at most 50 replies and says so; the rest exist only
+        # through the thread's own endpoint, and this sweep will not pass here again --
+        # the cursor moves past. Remembering it is the only thing that keeps them reachable.
+        store.cursors.setdefault("threads_incomplete", {})[thread] = chat_id
     return [root, *replies]
 
 
@@ -306,6 +329,28 @@ def migrate_threads(store: Store) -> int:
             _write_thread(store, at.parents[1].name, at.name, root)
             split += bool(nested)
     return split
+
+
+async def repair_thread(store: Store, thread: str, chat: str) -> list[dict]:
+    """Fetch every reply of a thread that was cut off at the inline cap, and rewrite it.
+
+    `+chat-messages-list` inlines at most 50 replies per thread and sets
+    `thread_has_more`; the rest exist only through the thread's own endpoint, which does
+    paginate. Measured on a real truncated thread: 50 on disk, 52 from here.
+
+    Returns the replies, so the caller can index what they carry. Empty on failure, which
+    leaves the thread on the repair list for the next run.
+    """
+    at = f"chats/{chat}/threads/{thread}"
+    try:
+        replies = [m async for m in cli.paginate("im", "+threads-messages-list", "--thread", thread, "--no-reactions", key="messages") if m.get("message_id")]
+    except cli.LarkError:
+        return []
+    for r in replies:
+        store.write_yaml(f"{at}/{r['message_id']}.yaml", _clean(r))
+    meta = store.read_yaml(f"{at}/meta.yaml")
+    store.write_yaml(f"{at}/meta.yaml", {**meta, "replies": len(replies), "has_more": False, "last_reply": max((r.get("create_time") or "" for r in replies), default=meta.get("last_reply", ""))})
+    return replies
 
 
 def _index_media(msg: dict) -> list[dict]:
