@@ -508,3 +508,25 @@ def test_a_failed_sweep_does_not_claim_its_window(tmp_path, monkeypatch):
 
     run(sync_module.sync_docs(store, Progress(), search=True))
     assert swept_recently(store, "docs", 6) is False, "a search that answered nothing claimed the window anyway"
+
+
+def test_a_partial_sweep_still_claims_its_window(tmp_path, monkeypatch):
+    """Measured over one real sweep: of 14 search queries, 4 answered and 10 were refused
+    outright. That is the ordinary shape of it, not an incident -- so a stamp that demands
+    every query answer never lands, and the pass that was supposed to coast for six hours
+    runs on every sync instead. The test is "did it find anything", not "was it flawless"."""
+    from lark_fs import sync as sync_module
+
+    async def flaky_run(*argv, **_):
+        if argv[1] != "+search":
+            raise cli.LarkError(list(argv), {"error": {"code": 1069307}})
+        if argv[argv.index("--query") + 1] != "":
+            raise cli.LarkError(list(argv), {"error": {"code": 99991400, "message": "rate limit"}})
+        return {"results": [{"entity_type": "DOC", "title_highlighted": "found", "result_meta": {"token": "tok1", "url": ""}}]}
+
+    monkeypatch.setattr(cli, "run", flaky_run)
+    store = Store(tmp_path)
+
+    run(sync_module.sync_docs(store, Progress()))
+
+    assert swept_recently(store, "docs", 6) is True, "one query answering was enough to sweep, but the window was refused"

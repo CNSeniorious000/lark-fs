@@ -577,10 +577,13 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "token": token, "entity_type": r.get("entity_type"), "title": title})
                 p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:
-            probed = False  # a query that never answered leaves a hole; come back sooner than the full window
             continue
 
-    if probed:
+    # Same test as the wiki walk: did the probes find anything, not were they all answered.
+    # Measured, 14 queries in one sweep: 4 answered and 10 were refused outright, and that
+    # is the ordinary shape of it -- so "every query answered" would never once be true and
+    # the search would run on every sync forever.
+    if probed and seen:
         record_sweep(store, "docs")
 
     # wiki nodes point at real documents and are enumerated exhaustively, unlike search
@@ -895,15 +898,15 @@ async def sync_wiki(store: Store, p: Progress):
             p.set("wiki", done=len(found), total=len(found) + len(frontier), note=f"{len(frontier)} branches queued")
         return found, whole
 
-    complete = True
+    harvest = 0
 
     async def one(space: dict):
-        nonlocal complete
+        nonlocal harvest
         if not (sid := space.get("space_id")):
             return
         store.write_yaml(f"wiki/{sid}/meta.yaml", space)
         nodes, whole = await walk(sid)
-        complete &= whole
+        harvest += len(nodes)
         rel = f"wiki/{sid}/nodes.yaml"
         # A partial walk must not overwrite a complete one. This node list is the only
         # place a wiki node_token can be resolved to the document it points at, and one
@@ -913,7 +916,11 @@ async def sync_wiki(store: Store, p: Progress):
         p.set("wiki", note=f"{len(nodes)} nodes" + ("" if whole else ", partial -- kept the copy on disk"))
 
     await cli.spread(one, items)
-    if complete:  # a partial walk already refuses to overwrite the copy on disk; it must not claim the window either
+    # "Did it fetch anything", not "was it flawless". A partial walk is the normal outcome
+    # under a rate limit, and refusing the stamp for it means the full tree is walked again
+    # on the very next run -- 442 requests every two minutes under `watch`, which is worse
+    # than the day of staleness this was meant to prevent.
+    if harvest:
         record_sweep(store, "wiki")
     p.set("wiki", state="done")
 
