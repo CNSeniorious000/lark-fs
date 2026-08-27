@@ -561,6 +561,13 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     seen: dict[str, dict] = {}
     alias = _wiki_aliases(store)
     probed = search and not queries  # a custom query set sweeps a different corpus; it is not the scheduled pass
+    # Sequential on purpose, and it is the one pass that does not fan out. Walking the 14
+    # queries end to end runs at ~1.15 req/s, which is under whatever sustained budget the
+    # endpoint enforces: measured twice, 14/14 queries answered, 4762 hits, 217s. Spreading
+    # them over the shared semaphore is 10x faster and silently wrong -- at width 3 nine
+    # queries were cut short by 99991400 and 2840 of those 4762 hits never arrived; at width
+    # 8, more. The burst is fine (14 first pages at 8-way, zero 429s); the sustained rate is
+    # not. This loop's slowness is the pacing.
     for q in queries or DOC_QUERIES if search else ():
         try:
             async for r in cli.paginate("drive", "+search", "--query", q, key="results"):
@@ -577,12 +584,13 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "token": token, "entity_type": r.get("entity_type"), "title": title})
                 p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:
+            probed = False  # cut short: the rest of this query's pages are gone, so the corpus on disk is partial
             continue
 
-    # Same test as the wiki walk: did the probes find anything, not were they all answered.
-    # Measured, 14 queries in one sweep: 4 answered and 10 were refused outright, and that
-    # is the ordinary shape of it -- so "every query answered" would never once be true and
-    # the search would run on every sync forever.
+    # A sweep that was cut short must not claim its window: coasting six hours on a corpus
+    # missing 60% of its hits is worse than paying for the pass again next run, and the
+    # limit that caused it clears in seconds. Measured clean, the sequential walk answers
+    # 14 of 14, so this is the rare case rather than the usual one.
     if probed and seen:
         record_sweep(store, "docs")
 
@@ -898,15 +906,15 @@ async def sync_wiki(store: Store, p: Progress):
             p.set("wiki", done=len(found), total=len(found) + len(frontier), note=f"{len(frontier)} branches queued")
         return found, whole
 
-    harvest = 0
+    complete = True
 
     async def one(space: dict):
-        nonlocal harvest
+        nonlocal complete
         if not (sid := space.get("space_id")):
             return
         store.write_yaml(f"wiki/{sid}/meta.yaml", space)
         nodes, whole = await walk(sid)
-        harvest += len(nodes)
+        complete &= whole
         rel = f"wiki/{sid}/nodes.yaml"
         # A partial walk must not overwrite a complete one. This node list is the only
         # place a wiki node_token can be resolved to the document it points at, and one
@@ -916,11 +924,10 @@ async def sync_wiki(store: Store, p: Progress):
         p.set("wiki", note=f"{len(nodes)} nodes" + ("" if whole else ", partial -- kept the copy on disk"))
 
     await cli.spread(one, items)
-    # "Did it fetch anything", not "was it flawless". A partial walk is the normal outcome
-    # under a rate limit, and refusing the stamp for it means the full tree is walked again
-    # on the very next run -- 442 requests every two minutes under `watch`, which is worse
-    # than the day of staleness this was meant to prevent.
-    if harvest:
+    # A partial walk already refuses to overwrite the copy on disk; it must not claim the
+    # window either. WIKI_WIDTH is set where this walks all 2366 nodes with zero 429s, so a
+    # partial one means something went wrong -- not the ordinary outcome to be tolerated.
+    if complete:
         record_sweep(store, "wiki")
     p.set("wiki", state="done")
 

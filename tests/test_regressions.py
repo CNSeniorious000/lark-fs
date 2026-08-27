@@ -510,11 +510,14 @@ def test_a_failed_sweep_does_not_claim_its_window(tmp_path, monkeypatch):
     assert swept_recently(store, "docs", 6) is False, "a search that answered nothing claimed the window anyway"
 
 
-def test_a_partial_sweep_still_claims_its_window(tmp_path, monkeypatch):
-    """Measured over one real sweep: of 14 search queries, 4 answered and 10 were refused
-    outright. That is the ordinary shape of it, not an incident -- so a stamp that demands
-    every query answer never lands, and the pass that was supposed to coast for six hours
-    runs on every sync instead. The test is "did it find anything", not "was it flawless"."""
+def test_a_sweep_cut_short_does_not_claim_its_window(tmp_path, monkeypatch):
+    """A query refused mid-pagination loses every page after it, and `except LarkError`
+    swallows that -- so the pass looks like it succeeded. Measured against the real
+    endpoint: run sequentially it answers 14 of 14 for 4762 hits, but spread three-wide
+    nine queries were cut short by 99991400 and 2840 of those hits never arrived.
+
+    Coasting six hours on a corpus missing 60% of itself is worse than paying for the pass
+    again, and the limit that caused it clears in seconds."""
     from lark_fs import sync as sync_module
 
     async def flaky_run(*argv, **_):
@@ -529,4 +532,5 @@ def test_a_partial_sweep_still_claims_its_window(tmp_path, monkeypatch):
 
     run(sync_module.sync_docs(store, Progress()))
 
-    assert swept_recently(store, "docs", 6) is True, "one query answering was enough to sweep, but the window was refused"
+    assert store.exists("docs/tok1/meta.yaml"), "the one query that answered was not written"
+    assert swept_recently(store, "docs", 6) is False, "a sweep that lost 13 of 14 queries claimed its six hours"
