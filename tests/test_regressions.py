@@ -1194,3 +1194,54 @@ def test_an_empty_repair_leaves_the_record_it_found(tmp_path, monkeypatch):
     meta = store.read_yaml(f"{at}/meta.yaml")
     assert meta["replies"] == 5, f"an empty answer erased a count that was right: {meta}"
     assert meta["has_more"] is True, "a thread that was never actually repaired was marked complete"
+
+
+def test_one_collection_failing_is_not_the_sync_failing(tmp_path, monkeypatch):
+    """`gather` without `return_exceptions` propagates the first error out of `sync_all`,
+    past `store.save_cursors()`, and out of `watch` -- which has nothing above it. So one
+    collection raising stops the daemon and discards the sweep clocks of every collection
+    that had already finished. `sync_profiles` raised on `contact:user:search`, a scope a
+    tenant may simply not grant, and a real install hit exactly that."""
+    from lark_fs import sync as sync_module
+
+    ran: list[str] = []
+
+    def stub(name: str, *, boom: bool = False):
+        async def collection(*_a, **_k):
+            if boom:
+                raise cli.LarkError([name], {"error": {"code": 99991672, "message": "missing scope"}})
+            ran.append(name)
+
+        return collection
+
+    monkeypatch.setattr(sync_module, "_learn_tenant", lambda _s: None)
+    monkeypatch.setattr(sync_module, "_list_chats", stub("roster"))
+    monkeypatch.setattr(sync_module, "sync_profiles", stub("profiles", boom=True))
+    for name in ("sync_messages", "sync_chat_meta", "sync_docs", "sync_minutes", "sync_meetings", "sync_bases", "sync_wiki", "sync_attachments"):
+        monkeypatch.setattr(sync_module, name, stub(name))
+
+    store = run(sync_module.sync_all(tmp_path, Progress()))
+
+    assert "sync_minutes" in ran and "sync_bases" in ran, f"a failing collection took the others with it: {ran}"
+    assert store.cursors is not None, "the run never reached the point where it saves"
+
+
+def test_a_deliberate_stop_still_stops(tmp_path, monkeypatch):
+    """The counterpart: ctrl-c and an exhausted monthly quota are not one collection's
+    problem, and swallowing them would keep the sync running against a spent quota."""
+    from lark_fs import sync as sync_module
+
+    async def stopped(*_a, **_k):
+        raise cli.SyncAbortedError
+
+    async def fine(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(sync_module, "_learn_tenant", lambda _s: None)
+    monkeypatch.setattr(sync_module, "_list_chats", fine)
+    monkeypatch.setattr(sync_module, "sync_bases", stopped)
+    for name in ("sync_messages", "sync_chat_meta", "sync_profiles", "sync_docs", "sync_minutes", "sync_meetings", "sync_wiki", "sync_attachments"):
+        monkeypatch.setattr(sync_module, name, fine)
+
+    with pytest.raises(cli.SyncAbortedError):
+        run(sync_module.sync_all(tmp_path, Progress()))

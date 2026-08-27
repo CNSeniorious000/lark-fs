@@ -20,7 +20,7 @@ from reactivity import reactive
 
 from . import cli
 from .attachments import sync_attachments
-from .cli import Aborted
+from .cli import Aborted, SyncAbortedError
 from .store import Store
 
 TZ = "+08:00"
@@ -543,7 +543,15 @@ async def sync_profiles(store: Store, p: Progress):
     quota for nothing.
     """
     p.set("profiles", state="running")
-    tenant = (((await cli.run("contact", "+get-user")) or {}).get("user") or {}).get("tenant_key")
+    try:
+        tenant = (((await cli.run("contact", "+get-user")) or {}).get("user") or {}).get("tenant_key")
+    except cli.LarkError as e:
+        # `contact:user:search` is a scope a tenant may simply not grant, and this pass is
+        # the only one that needs it. Left to propagate it takes `sync_all` down with it,
+        # and under `watch` that is the daemon -- one optional scope ending every other
+        # collection. A real install hit exactly this.
+        p.set("profiles", state="error", note=_reason(e))
+        return
     on_disk = {d.name: store.read_yaml(f"users/{d.name}/meta.yaml") for d in (store.root / "users").glob("ou_*")}
     # a resolved profile is not a permanent one: an email, a department and an activation
     # state all change, and "localized_name is present" was reading as "done for good"
@@ -558,7 +566,11 @@ async def sync_profiles(store: Store, p: Progress):
 
     async def one(batch: list[str]):
         nonlocal resolved
-        d = await cli.run("contact", "+search-user", "--user-ids", ",".join(batch), "--as", "user") or {}
+        try:
+            d = await cli.run("contact", "+search-user", "--user-ids", ",".join(batch), "--as", "user") or {}
+        except cli.LarkError:
+            p.bump("profiles", len(batch))  # one batch that would not resolve is not the pass failing
+            return
         rows = d.get("users") or []
         for row in rows:
             rel = f"users/{row['open_id']}/meta.yaml"
@@ -1243,6 +1255,15 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     # get that wrong and the task is simply abandoned when gather returns.
     tasks += [t for t in (roster, messages, wiki, rosters) if t]
 
-    await gather(*tasks)
+    # One collection failing is not the sync failing. Without this a single LarkError that
+    # nothing caught -- `sync_profiles` raised on a scope a tenant had not granted, which a
+    # real install hit -- propagates out of `gather`, past `store.save_cursors()`, and out
+    # of `watch`, which has nothing above it: the daemon stops on one optional scope. A
+    # deliberate stop is the exception, and still is one.
+    for outcome in await gather(*tasks, return_exceptions=True):
+        if isinstance(outcome, SyncAbortedError | KeyboardInterrupt):
+            raise outcome
+        if isinstance(outcome, BaseException):
+            p.set("errors", state="error", note=cli.oneline(str(outcome), 70))
     store.save_cursors()
     return store
