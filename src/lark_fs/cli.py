@@ -311,6 +311,13 @@ async def paginate(*argv: str, key: str, page_size: int = 50, prefetch: bool = F
     consumed. A page arrives in milliseconds but the next request takes a second or
     two, so without this the caller does all its work in one burst and then idles --
     which reads as a frozen counter rather than steady progress.
+
+    A caller that stops early -- `sync_messages` does, once a chat passes its slice
+    threshold -- leaves a prefetch in flight. The `finally` cancels it, so the answer is
+    not paid for and thrown away, and the task does not outlive the generator that owns
+    it. Reaching that `finally` at a useful moment is the caller's half of the deal:
+    abandoning an async generator defers its cleanup to garbage collection, so consumers
+    that may break out early wrap it in `contextlib.aclosing`.
     """
 
     size = page_size
@@ -329,30 +336,35 @@ async def paginate(*argv: str, key: str, page_size: int = 50, prefetch: bool = F
                 raise
         return None
 
-    data = await fetch(None)
-    while data:
-        items = data.get(key) or []
-        token = data.get("page_token")
-        upcoming = None
-        if token and data.get("has_more"):
-            # start the next request before handing out this page, so the caller's work
-            # overlaps the wait instead of finishing in a burst and then idling
-            upcoming = create_task(fetch(token)) if prefetch else None
-        else:
-            token = None
+    upcoming = None
+    try:
+        data = await fetch(None)
+        while data:
+            items = data.get(key) or []
+            token = data.get("page_token")
+            upcoming = None
+            if token and data.get("has_more"):
+                # start the next request before handing out this page, so the caller's work
+                # overlaps the wait instead of finishing in a burst and then idling
+                upcoming = create_task(fetch(token)) if prefetch else None
+            else:
+                token = None
 
-        pace = 1.0 / (len(items) or 1) if upcoming else 0
-        for item in items:
-            yield item
-            if pace:
-                await sleep(pace)
+            pace = 1.0 / (len(items) or 1) if upcoming else 0
+            for item in items:
+                yield item
+                if pace:
+                    await sleep(pace)
 
-        if upcoming:
-            data = await upcoming
-        elif token:
-            data = await fetch(token)
-        else:
-            return
+            if upcoming:
+                data = await upcoming
+            elif token:
+                data = await fetch(token)
+            else:
+                return
+    finally:
+        if upcoming and not upcoming.done():
+            upcoming.cancel()
 
 
 async def spread[T](work: Callable[[T], Awaitable[object]], items: Collection[T], width: int = CONCURRENCY):

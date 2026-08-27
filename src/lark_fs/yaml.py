@@ -9,7 +9,7 @@ type JSON = dict[str, JSON] | list[JSON] | tuple[JSON, ...] | str | int | float 
 # and a hand-picked set of nasty inputs will not contain a character nobody types. Such a string
 # is written as a double-quoted scalar instead, where they survive as escapes -- dropping
 # them would lose part of a message that no later run can fetch back.
-RE_UNPRINTABLE = compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029]")
+RE_UNPRINTABLE = compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff\ufffe\uffff]")
 
 
 def _quote_double(value: str) -> str:
@@ -166,7 +166,12 @@ def _append_literal_block(value: str, lines: list[str], indent: int):
         chomp = "+"
         stripped_value = value
 
-    explicit = "2" if stripped_value.startswith(" ") else ""
+    # Any line starting with a space is enough to need the indicator, not just the first
+    # one: a blank line indented deeper than the content that follows it defines the
+    # block's indentation just as well. Two spellings of the same failure -- " a\nb" ends
+    # the block early, "\n a\n b" loses the spaces without a word -- and stating the
+    # indentation outright is correct in every case, so the test is deliberately broad.
+    explicit = "2" if any(line.startswith(" ") for line in stripped_value.split("\n")) else ""
     lines.append(f" |{explicit}{chomp}\n")
 
     # Output content lines

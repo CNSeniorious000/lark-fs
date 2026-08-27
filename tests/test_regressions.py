@@ -1,7 +1,7 @@
 """Regressions for failures that were silent -- each one shipped and produced plausible output."""
 
 from asyncio import Semaphore, create_task, gather, run, sleep
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
 from yaml import safe_load
@@ -10,7 +10,7 @@ from lark_fs import cli
 from lark_fs.attachments import Policy, _pending, _settle
 from lark_fs.reindex import reindex
 from lark_fs.store import Store
-from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _edit_signal, _index_media, _note_tenant, _wiki_aliases, _windows, _write_thread, migrate_threads
+from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _edit_signal, _index_media, _note_tenant, _wiki_aliases, _windows, _write_thread, migrate_threads, swept_recently
 from lark_fs.yaml import JSON, readable_yaml_dumps
 
 
@@ -387,15 +387,19 @@ def test_a_message_body_is_not_always_a_string():
 
 def test_every_codepoint_round_trips():
     """A hand-picked set of nasty inputs is a guess about which characters are dangerous,
-    and it guessed wrong: it covered the C0 controls and missed C1 entirely, so a real
-    message carrying U+009A stayed unreadable through two rounds of repair. Sweeping the
-    range instead is what found the boundary."""
-    for cp in range(0x2200):
+    and the guess has been wrong twice: it covered C0 and missed C1, so a real message
+    carrying U+009A stayed unreadable through two rounds of repair; then it stopped at
+    U+2200 and missed the surrogates and U+FFFE/U+FFFF, which a reviewer had to point out.
+
+    The shapes matter as much as the range. A character is only dangerous in some
+    positions -- ` a\nb` ends its block early, `\n a\n b` loses the spaces in silence --
+    so each codepoint is tried in five, including two that put a blank line first."""
+    for cp in range(0x11000):  # past the BMP, so the surrogates and noncharacters are in
         ch = chr(cp)
-        for value in (f"x{ch}y", f"a\n{ch}b"):  # the scalar path and the literal-block path
+        for value in (f"x{ch}y", f"a\n{ch}b", f"\n {ch}c", f"\n  \n {ch}", f"{ch}\n a\n  b"):
             loaded = safe_load(readable_yaml_dumps({"body": value, "after": "sentinel"}))
-            assert loaded["body"] == value, f"U+{cp:04X} did not survive: {loaded['body']!r}"
-            assert loaded["after"] == "sentinel", f"U+{cp:04X} restructured the document"
+            assert loaded["body"] == value, f"U+{cp:04X} in {value!r} did not survive: {loaded['body']!r}"
+            assert loaded["after"] == "sentinel", f"U+{cp:04X} in {value!r} restructured the document"
 
 
 def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
@@ -420,3 +424,21 @@ def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
     assert got["localized_name"] == "Mia(张亚)", "the alias that disambiguates same-named people was not taken"
     assert got["name"] == "张亚" and got["member_id"] == "ou_1", f"the roster's own fields were overwritten: {got}"
     assert not {"chat_recency_hint", "match_segments", "has_chatted"} & got.keys(), f"volatile fields landed on disk: {got}"
+
+
+def test_a_discovery_pass_coasts_but_an_explicit_request_never_does(tmp_path):
+    """The wiki walk and the doc search probes were 690 of one sync's 1247 requests, and
+    neither can be made incremental -- a wiki node carries no update time and a search is
+    a ranked slice. Frequency is the only lever, so a plain sync lets them coast."""
+    store = Store(tmp_path)
+    assert swept_recently(store, "wiki", 24) is False, "never swept, so it is due"
+    assert swept_recently(store, "wiki", 24) is True, "just swept, so it coasts"
+    assert swept_recently(store, "docs", 24) is False, "each pass keeps its own clock"
+
+
+def test_a_sweep_comes_due_again(tmp_path):
+    """A clock that never expires is not a schedule, it is a one-shot."""
+    store = Store(tmp_path)
+    swept_recently(store, "wiki", 24)
+    store.cursors["swept"]["wiki"] = (datetime.now(UTC) - timedelta(hours=25)).isoformat(timespec="seconds")
+    assert swept_recently(store, "wiki", 24) is False

@@ -8,6 +8,7 @@ they re-list metadata (cheap) but skip fetching bodies for entities already on d
 
 from asyncio import create_task, gather
 from collections.abc import MutableMapping
+from contextlib import aclosing
 from datetime import UTC, datetime, timedelta, timezone
 from itertools import islice
 from pathlib import Path
@@ -79,6 +80,11 @@ SLICE_HOURS = 12
 # over a full tree: at 8 it lost 315 nodes to 35 rate limits; at 3 it walked all 2366 with
 # none, for 108s instead of 43s. A tree walked once a day can afford the difference.
 WIKI_WIDTH = 3
+# How long a discovery pass may coast before a plain `sync` runs it again. Neither has an
+# incremental signal to offer, so this is the only lever on what they cost -- and the wiki
+# comment above already says a tree walked once a day can afford its width.
+WIKI_HOURS = 24.0
+SEARCH_HOURS = 6.0
 STAMP = "%Y-%m-%d %H:%M"  # what the API both returns in create_time and accepts in --start/--end
 TENANT_TZ = timezone(timedelta(hours=8))  # the same offset as TZ, as a clock rather than a suffix
 
@@ -150,25 +156,29 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         nonlocal total
         argv = ["im", "+chat-messages-list", "--chat-id", chat_id, "--order", "asc", "--no-reactions", *(["--start", start] if start else []), *(["--end", end] if end else [])]
         newest, seen = "", 0
-        async for msg in cli.paginate(*argv, key="messages", prefetch=True):
-            if not (mid := msg.get("message_id")):
-                continue
-            created = msg.get("create_time", "")
-            if thread := msg.get("thread_id"):
-                written = _write_thread(store, chat_id, thread, msg)
-            else:
-                store.write_yaml(f"chats/{chat_id}/messages/{created[:7] or 'unknown'}/{mid}.yaml", _clean(msg))
-                written = [msg]
-            for one_msg in written:  # a thread arrives as one item but is many messages
-                media.extend(_index_media(one_msg))
-                _record_sender(store, one_msg, users)
-            total += len(written)
-            newest = max(newest, created)
-            if total % 20 == 0:
-                sender = (msg.get("sender") or {}).get("name") or ""
-                p.set("messages", last=f"{sender}: {cli.oneline(msg.get('content'), 40)}", note=f"{total} messages")
-            if limit and (seen := seen + 1) >= limit:
-                return newest, True
+        # this loop returns early once `limit` is reached, and the generator holds a
+        # prefetched page in flight -- without aclosing that request is paid for, thrown
+        # away, and its cleanup deferred to garbage collection
+        async with aclosing(cli.paginate(*argv, key="messages", prefetch=True)) as pages:
+            async for msg in pages:
+                if not (mid := msg.get("message_id")):
+                    continue
+                created = msg.get("create_time", "")
+                if thread := msg.get("thread_id"):
+                    written = _write_thread(store, chat_id, thread, msg)
+                else:
+                    store.write_yaml(f"chats/{chat_id}/messages/{created[:7] or 'unknown'}/{mid}.yaml", _clean(msg))
+                    written = [msg]
+                for one_msg in written:  # a thread arrives as one item but is many messages
+                    media.extend(_index_media(one_msg))
+                    _record_sender(store, one_msg, users)
+                total += len(written)
+                newest = max(newest, created)
+                if total % 20 == 0:
+                    sender = (msg.get("sender") or {}).get("name") or ""
+                    p.set("messages", last=f"{sender}: {cli.oneline(msg.get('content'), 40)}", note=f"{total} messages")
+                if limit and (seen := seen + 1) >= limit:
+                    return newest, True
         return newest, False
 
     async def one(chat_id: str):
@@ -518,12 +528,32 @@ def _wiki_aliases(store: Store) -> dict[str, str]:
     return {n["node_token"]: n["obj_token"] for n in store.glob_rows("wiki/*/nodes.yaml") if n.get("node_token") and n.get("obj_token")}
 
 
-async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None):
+def swept_recently(store: Store, name: str, hours: float) -> bool:
+    """Has this discovery pass run within `hours`? Records the sweep when it has not.
+
+    Measured over one full sync: 442 of 1247 requests were the wiki tree walk and 248 were
+    the doc search probes -- 55% of the run, spent rediscovering corpora that barely move.
+    Neither can be made incremental, and it is not for want of trying: a wiki node carries
+    no update time (only token, type, title and has_child) and a search returns a ranked
+    slice with no cursor. Frequency is the only variable left.
+
+    An explicit `--only wiki` always sweeps: asking for a collection by name is asking for
+    it now, and this only governs what a plain `sync` does on its own initiative.
+    """
+    now = datetime.now(UTC)
+    swept: dict[str, str] = store.cursors.setdefault("swept", {})
+    if (last := swept.get(name)) and datetime.fromisoformat(last) > now - timedelta(hours=hours):
+        return True
+    swept[name] = now.isoformat(timespec="seconds")
+    return False
+
+
+async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None, search: bool = True):
     """Cloud docs discovered via search and via wiki nodes, exported to markdown, plus comments."""
     p.set("docs", state="running")
     seen: dict[str, dict] = {}
     alias = _wiki_aliases(store)
-    for q in queries or DOC_QUERIES:
+    for q in queries or DOC_QUERIES if search else ():
         try:
             async for r in cli.paginate("drive", "+search", "--query", q, key="results"):
                 meta = r.get("result_meta") or {}
@@ -897,7 +927,11 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
         return await sync_messages(store, p, chat_ids=await roster if roster else None)
 
     messages = create_task(walk_messages()) if "messages" in want else None
-    wiki = create_task(sync_wiki(store, p)) if "wiki" in want else None
+    # `only` names what the caller asked for; a plain sync asks for everything, and that is
+    # the case where the discovery passes are allowed to skip a turn (see swept_recently)
+    asked = set(only or ())
+    walk_wiki = "wiki" in want and ("wiki" in asked or not swept_recently(store, "wiki", WIKI_HOURS))
+    wiki = create_task(sync_wiki(store, p)) if walk_wiki else None
 
     async def chats():
         # depends on the roster, not on the sweep, so a rate-limited sweep cannot take it down
@@ -915,7 +949,8 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     async def docs():
         if wiki:
             await wiki
-        await sync_docs(store, p)
+        # the body fetch below it is already incremental; only the search probes are not
+        await sync_docs(store, p, search="docs" in asked or not swept_recently(store, "docs", SEARCH_HOURS))
 
     async def files():
         # the media index is a by-product of the message sweep; on its own it reads
