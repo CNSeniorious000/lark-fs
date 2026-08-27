@@ -956,3 +956,21 @@ def test_a_quota_stop_does_not_read_as_a_rerunnable_interruption(monkeypatch):
 
 async def _done(value):
     return value
+
+
+def test_a_media_row_can_be_opened_in_feishu():
+    """The design asked for media stored as URLs. Lark gives an attachment no address of
+    its own -- a key is only usable through `+messages-resources-download` -- but the
+    message that carried it has an applink, and that is already on the message. So a
+    filename found by grep leads somewhere instead of dead-ending at an opaque key."""
+    row = _index_media(
+        {
+            "message_id": "om_1",
+            "chat_id": "oc_1",
+            "msg_type": "file",
+            "content": '<file key="file_v3_001_abc" name="notes.md">',
+            "message_app_link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_1&position=42",
+        }
+    )[0]
+    assert row["link"] == "https://applink.feishu.cn/client/chat/open?openChatId=oc_1&position=42", f"the media row cannot be opened: {row}"
+    assert row["key"] == "file_v3_001_abc" and row["name"] == "notes.md"

@@ -423,7 +423,13 @@ async def repair_unreadable(store: Store, chunk: list[tuple[str, str]]) -> list[
 
 
 def _index_media(msg: dict) -> list[dict]:
-    """Collect media references as keys/URLs. Bytes are never downloaded."""
+    """Collect media references as keys and a link to the message holding them.
+
+    Bytes are never downloaded here. Lark gives an attachment no address of its own -- a
+    key is only usable through `+messages-resources-download` -- so the closest thing to
+    the URL the design asked for is the applink of the message it arrived in, which opens
+    it in Feishu. It costs nothing: the message already carries it.
+    """
     rows = [
         {
             "key": img or md or key,
@@ -432,6 +438,7 @@ def _index_media(msg: dict) -> list[dict]:
             "message_id": msg.get("message_id"),
             "chat_id": msg.get("chat_id"),
             "create_time": msg.get("create_time", ""),
+            "link": msg.get("message_app_link", ""),
         }
         # a message body is not always a string: one real message is a 48-digit number, and
         # `cli.oneline` already coerces for the same reason
