@@ -38,5 +38,7 @@ def reindex(root: Path) -> dict[str, int]:
         _record_sender(store, msg, known)
 
     _flush_media(store, media)
-    store.save_cursors()
+    # this scan takes minutes; a full save would write back the snapshot it loaded at the
+    # start, undoing every cursor a sync advanced while it ran
+    store.save_cursor("messages_unreadable")
     return {"messages": scanned, "users": len(known), "media": len(media), "unreadable": len(unreadable), "threads_split": split}

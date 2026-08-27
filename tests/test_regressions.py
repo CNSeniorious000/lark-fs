@@ -1085,3 +1085,74 @@ def test_the_cursor_does_not_advance_past_the_minute_it_read(tmp_path, monkeypat
     run(sync_module.sync_messages(store, Progress(), chat_ids={"oc_1"}))
     assert starts[1] == "2026-08-03 11:17", f"the second run asked past the minute it had read: {starts}"
     assert store.exists("chats/oc_1/messages/2026-08/om_2.yaml"), "a message that arrived later in the same minute was never fetched"
+
+
+def test_one_pass_saving_its_cursor_does_not_undo_another(tmp_path):
+    """Cursors are read into memory once, at construction, and `save_cursors` writes the
+    whole dict back. That is fine for the sync, which owns the file for its run, and wrong
+    for anything holding a Store beside it: the daemon keeps one from startup and hands it
+    to `recheck_messages` while `sync_all` runs on its own, and `reindex` makes a third and
+    takes minutes. A full save from the stale one erases every advance the others made --
+    chat cursors regress, and `threads_incomplete` registrations disappear.
+
+    Merging is not the fix: the repair queue has to be able to shrink, and a merge would
+    restore every entry a repair had just cleared."""
+    daemon = Store(tmp_path)  # loaded at startup, before the sync below runs
+    daemon.cursors["recheck_after"] = "om_000"
+    daemon.save_cursor("recheck_after")
+
+    sweep = Store(tmp_path)
+    sweep.cursors["chats"] = {"oc_1": "2026-08-03 11:17"}
+    sweep.cursors["threads_incomplete"] = {"omt_1": "oc_1"}
+    sweep.save_cursors()
+
+    daemon.cursors["recheck_after"] = "om_500"  # the daemon's next tick, still holding its snapshot
+    daemon.save_cursor("recheck_after")
+
+    after = Store(tmp_path).cursors
+    assert after["recheck_after"] == "om_500", "the tier's own cursor did not persist"
+    assert after["chats"] == {"oc_1": "2026-08-03 11:17"}, "the sweep's chat cursors were erased by another pass"
+    assert after["threads_incomplete"] == {"omt_1": "oc_1"}, "a thread left truncated at the inline cap lost the only record that would fix it"
+
+
+def test_a_repaired_thread_can_leave_the_queue(tmp_path):
+    """The counterpart: the queue has to shrink. A save that merged with disk would put
+    back every entry a repair had just cleared, and the repair would run forever."""
+    store = Store(tmp_path)
+    store.cursors["threads_incomplete"] = {"omt_1": "oc_1", "omt_2": "oc_1"}
+    store.save_cursors()
+
+    store.cursors["threads_incomplete"].pop("omt_1")
+    store.save_cursors()
+
+    assert Store(tmp_path).cursors["threads_incomplete"] == {"omt_2": "oc_1"}, "a repaired thread came back onto the queue"
+
+
+def test_the_recheck_tier_does_not_clobber_the_sweep_it_runs_beside(tmp_path, monkeypatch):
+    """The daemon builds one Store at startup and hands it to this tier, while `sync_all`
+    runs on its own. This tier grew a cursor of its own -- and saving it the obvious way
+    wrote the startup snapshot back over every chat cursor the sweep had advanced since,
+    and over every `threads_incomplete` registration, every 30 minutes."""
+    from lark_fs import sync as sync_module
+
+    async def unchanged(*argv, **_):
+        chunk = argv[argv.index("--message-ids") + 1].split(",")
+        return {"messages": [{"message_id": m} for m in chunk]}
+
+    monkeypatch.setattr(cli, "run", unchanged)
+    daemon = Store(tmp_path)  # the daemon's Store, loaded before the sweep below
+    month = datetime.now(UTC).strftime("%Y-%m")
+    for i in range(4):
+        daemon.write_yaml(f"chats/oc_1/messages/{month}/om_{i:03}.yaml", {"message_id": f"om_{i:03}"})
+
+    sweep = Store(tmp_path)
+    sweep.cursors["chats"] = {"oc_1": "2026-08-03 11:17"}
+    sweep.cursors["threads_incomplete"] = {"omt_1": "oc_1"}
+    sweep.save_cursors()
+
+    run(sync_module.recheck_messages(daemon, Progress(), batch=2, budget=2))
+
+    after = Store(tmp_path).cursors
+    assert after.get("recheck_after"), "the tier's own cursor was not persisted"
+    assert after.get("chats") == {"oc_1": "2026-08-03 11:17"}, "the sweep's chat cursors were rolled back to the daemon's startup snapshot"
+    assert after.get("threads_incomplete") == {"omt_1": "oc_1"}, "threads left truncated at the inline cap lost the only record that would fix them"

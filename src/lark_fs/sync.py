@@ -844,7 +844,7 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
         p.bump("recheck", len(chunk), last=f"{changed} changed, {len(gone)} recalled")
     store.write_yaml("recalled.yaml", [gone[k] for k in sorted(gone)])
     store.cursors["recheck_after"] = cold[-1] if cold else ""  # the sweeping half owns the cursor; the hot half is not in order
-    store.save_cursors()
+    store.save_cursor("recheck_after")  # the daemon holds this Store from startup; a full save would undo everything the sync advanced since
     p.set("recheck", state="done", note=f"{changed} updated, {len(gone)} recalled, {len(by_id)} in window")
 
 

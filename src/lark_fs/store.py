@@ -45,6 +45,25 @@ class Store:
     def save_cursors(self):
         self._cursors_path.write_text(dumps(self.cursors, ensure_ascii=False, indent=2))
 
+    def save_cursor(self, key: str):
+        """Persist one key without carrying the rest of this Store's snapshot with it.
+
+        Cursors are read into memory once, at construction, and `save_cursors` writes the
+        whole dict back -- fine for the sync, which owns the file for its run, and wrong
+        for anything holding a Store alongside it. The daemon keeps one from startup and
+        hands it to `recheck_messages` while `sync_all` runs on its own; `reindex` makes a
+        third and takes minutes. Whichever writes last erases every advance the others
+        made: chat cursors regress to a stale snapshot, and `threads_incomplete`
+        registrations disappear -- 57 threads on this store sat truncated at the inline cap
+        with nothing queued to finish them.
+
+        Merging instead of replacing would not do: the repair queue has to be able to
+        shrink, and a merge would restore every entry a repair had just cleared.
+        """
+        on_disk = loads(self._cursors_path.read_text()) if self._cursors_path.exists() else {}
+        on_disk[key] = self.cursors.get(key)
+        self._cursors_path.write_text(dumps(on_disk, ensure_ascii=False, indent=2))
+
     def write(self, rel: str, content: str) -> bool:
         """Write text, returning whether it actually changed (keeps mtimes meaningful)."""
         path = self.root / rel
