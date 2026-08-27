@@ -102,7 +102,10 @@ WIKI_HOURS = 24.0
 SEARCH_HOURS = 6.0
 ROSTER_HOURS = 24.0  # one request per chat, 200 on this store
 PROFILE_HOURS = 168.0  # one per 19 users, and a name or a department moves far more slowly than a roster
-MEETING_SETTLE_DAYS = 7  # a minute appears only once the recording is processed, well after the meeting ends
+MEETING_SETTLE_DAYS = 7
+RECHECK_FRESH_SECONDS = (
+    3600.0  # how recently written counts as "just synced", for the half of the recheck that is not a sweep  # a minute appears only once the recording is processed, well after the meeting ends
+)
 STAMP = "%Y-%m-%d %H:%M"  # what the API both returns in create_time and accepts in --start/--end
 TENANT_TZ = timezone(timedelta(hours=8))  # the same offset as TZ, as a clock rather than a suffix
 
@@ -783,10 +786,27 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
         return
 
     by_id = {f.stem: f for f in files}
-    ids = sorted(by_id)  # stable between runs, which is what makes resuming from an id mean anything
-    start = bisect_right(ids, store.cursors.get("recheck_after") or "")
-    slice_ = ids[start : start + budget * batch] or ids[: budget * batch]  # wrapped: begin again at the oldest
-    p.set("recheck", state="running", total=len(slice_), done=0, note=f"{len(ids)} in window")
+    half = budget * batch // 2
+    # Up to half the budget on what this mirror wrote most recently, because that is where an
+    # edit lands -- usually within minutes of the message. Message ids do not encode that:
+    # measured over the real window their sort order runs *against* create_time (Kendall tau
+    # -0.73), so a cursor alone reaches a new message at a random point in its cycle, 15
+    # hours in on average, against the 30 minutes this used to take.
+    #
+    # A window rather than a top-N: this pass rewrites what it finds edited, which resets
+    # the very mtime it sorts on, so a top-N would keep re-picking whatever it just touched.
+    # An hour of a sweep that runs every two minutes is a small, self-limiting set.
+    fresh = datetime.now(UTC).timestamp() - RECHECK_FRESH_SECONDS
+    hot = sorted((f.stat().st_mtime, f.stem) for f in files if f.stat().st_mtime >= fresh)[-half:]
+    hot = [mid for _, mid in hot]
+    # The other half sweeps everything else, resumed from the last id read rather than an
+    # offset -- the list shifts as messages arrive and age out.
+    room = budget * batch - len(hot)  # whatever the hot half did not need; an hour is usually far under it
+    rest = sorted(set(by_id) - set(hot))
+    start = bisect_right(rest, store.cursors.get("recheck_after") or "")
+    cold = rest[start : start + room] or rest[:room]  # wrapped: begin again at the start
+    slice_ = sorted(set(hot) | set(cold))
+    p.set("recheck", state="running", total=len(slice_), done=0, note=f"{len(by_id)} in window")
 
     # written by an earlier slice, and this one only sees its own ids -- rewriting the file
     # from what came back here would erase every recall recorded before it
@@ -817,9 +837,9 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
                 changed += 1
         p.bump("recheck", len(chunk), last=f"{changed} changed, {len(gone)} recalled")
     store.write_yaml("recalled.yaml", [gone[k] for k in sorted(gone)])
-    store.cursors["recheck_after"] = slice_[-1] if slice_ else ""
+    store.cursors["recheck_after"] = cold[-1] if cold else ""  # the sweeping half owns the cursor; the hot half is not in order
     store.save_cursors()
-    p.set("recheck", state="done", note=f"{changed} updated, {len(gone)} recalled, {len(ids)} in window")
+    p.set("recheck", state="done", note=f"{changed} updated, {len(gone)} recalled, {len(by_id)} in window")
 
 
 def _rows(payload: dict) -> list[dict]:
