@@ -240,7 +240,13 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
             # a cursor past messages whose attachments were never recorded. Nothing looks
             # at those messages again; only a full `reindex` finds them.
             _flush_media(store, [r for r in media if r.get("chat_id") == chat_id])
-            # store one second past the last message, or every run re-reads it
+            # The cursor is the last create_time read, unadvanced. It has to be: `create_time`
+            # has minute resolution and `--start` includes that minute, so moving the cursor
+            # past it would skip every message that arrives later in the same minute -- and
+            # those are common, not an edge case (861 same-minute groups in 4000 files
+            # sampled). The cost of not advancing is re-reading one minute per chat per run,
+            # which `Store.write` turns into no writes at all. Measured: asking with a
+            # message's own create_time returns that message.
             cursors[chat_id] = newest
             store.save_cursors()
         p.bump("messages")

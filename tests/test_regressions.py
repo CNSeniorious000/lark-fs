@@ -1054,3 +1054,34 @@ def test_the_full_walk_is_what_claims_the_clock(tmp_path, monkeypatch):
 
     run(sync_module.sync_minutes(store, Progress(), full=True))
     assert swept_recently(store, "minutes", 6) is True
+
+
+def test_the_cursor_does_not_advance_past_the_minute_it_read(tmp_path, monkeypatch):
+    """`create_time` has minute resolution and `--start` includes that minute, so a cursor
+    moved past the last message read would skip everything that arrives later in the same
+    minute. Those are common: 861 same-minute groups in 4000 files sampled off the real
+    store, and asking with a message's own create_time returns that message.
+
+    The comment here used to claim the cursor was stored "one second past the last message";
+    the code never did that, and doing it would lose messages silently and permanently."""
+    from lark_fs import sync as sync_module
+
+    starts: list[str] = []
+    batches = [
+        [{"message_id": "om_1", "create_time": "2026-08-03 11:17", "chat_id": "oc_1"}],
+        [{"message_id": "om_2", "create_time": "2026-08-03 11:17", "chat_id": "oc_1"}],  # same minute, arrived later
+    ]
+
+    def paginate(*argv, **_k):
+        starts.append(argv[argv.index("--start") + 1] if "--start" in argv else "")
+        return _aiter(batches.pop(0) if batches else [])
+
+    monkeypatch.setattr(cli, "paginate", paginate)
+    store = Store(tmp_path)
+
+    run(sync_module.sync_messages(store, Progress(), chat_ids={"oc_1"}))
+    assert store.cursors["chats"]["oc_1"] == "2026-08-03 11:17"
+
+    run(sync_module.sync_messages(store, Progress(), chat_ids={"oc_1"}))
+    assert starts[1] == "2026-08-03 11:17", f"the second run asked past the minute it had read: {starts}"
+    assert store.exists("chats/oc_1/messages/2026-08/om_2.yaml"), "a message that arrived later in the same minute was never fetched"
