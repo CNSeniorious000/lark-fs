@@ -120,6 +120,19 @@ not one that only shows in a transient state:
 - What an error *means* is the caller's to decide. `repair_unreadable` returned `[]` both
   when the server had dropped a message and when the request failed, and the caller
   cleared its repair queue either way. Raise, and let whoever knows the difference act.
+- A record must never describe less than what is beside it. A listing inlines at most 50
+  replies, so writing that count as a thread's truth walked it backwards past replies
+  already on disk — one said `replies: 0` next to five files — and reset `has_more`,
+  re-queueing a repair that had finished. The inline view is a floor.
+- Cursors are read once, at construction, and `save_cursors` writes the whole file. Only
+  the pass that owns the file for its run may call it. Anything holding a Store beside it
+  — the daemon keeps one from startup, `reindex` builds a third and takes minutes — uses
+  `save_cursor(key)` for the one key it owns, or its stale snapshot rolls back every
+  advance the others made. Merging is not the alternative: the repair queue has to shrink.
+- One collection failing is not the sync failing, and a failure has to land on a row that
+  is drawn. `gather` without `return_exceptions` let an ungranted scope end the daemon;
+  reporting the catch on a row outside `ALL` then made it invisible, which is the same
+  silent failure one level up. Both renderers walk the names they were given.
 - Structured data is YAML via `yaml.py` (literal blocks for multi-line text) so message
   bodies stay greppable as plain lines. Never write JSON for entity data.
 - `Progress` rows are reactive: replace the whole row dict, never mutate in place, or
