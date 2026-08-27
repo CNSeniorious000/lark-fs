@@ -1220,10 +1220,15 @@ def test_one_collection_failing_is_not_the_sync_failing(tmp_path, monkeypatch):
     for name in ("sync_messages", "sync_chat_meta", "sync_docs", "sync_minutes", "sync_meetings", "sync_bases", "sync_wiki", "sync_attachments"):
         monkeypatch.setattr(sync_module, name, stub(name))
 
-    store = run(sync_module.sync_all(tmp_path, Progress()))
+    p_ = Progress()
+    store = run(sync_module.sync_all(tmp_path, p_))
 
     assert "sync_minutes" in ran and "sync_bases" in ran, f"a failing collection took the others with it: {ran}"
     assert store.cursors is not None, "the run never reached the point where it saves"
+    # and it has to be visible: both renderers walk the names they were given, so a row
+    # outside that list is never drawn -- reporting there is the silent failure again
+    assert p_.rows["profiles"]["state"] == "error", f"the failure was not reported on the row that gets drawn: {sorted(p_.rows)}"
+    assert set(p_.rows) <= set(sync_module.ALL) | {"roster"}, f"a row nothing renders: {sorted(set(p_.rows) - set(sync_module.ALL))}"
 
 
 def test_a_deliberate_stop_still_stops(tmp_path, monkeypatch):

@@ -1194,7 +1194,7 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     _learn_tenant(store)
     migrate_threads(store)
     want = set(only or ALL)
-    tasks = []
+    named: dict[str, Any] = {}  # by the row each one reports under, so a failure lands where it is drawn
 
     # The roster is one request, and it is all the chat pass ever wanted. It used to be
     # taken from the message sweep's return value -- which meant waiting out a sweep of
@@ -1238,32 +1238,38 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
         await sync_attachments(store, p)
 
     if "profiles" in want:
-        tasks.append(profiles())
+        named["profiles"] = profiles()
     if "docs" in want:
-        tasks.append(docs())
+        named["docs"] = docs()
     if "files" in want:
-        tasks.append(files())
+        named["files"] = files()
     if "minutes" in want:
-        tasks.append(sync_minutes(store, p, full="minutes" in asked or not swept_recently(store, "minutes", SEARCH_HOURS)))
+        named["minutes"] = sync_minutes(store, p, full="minutes" in asked or not swept_recently(store, "minutes", SEARCH_HOURS))
     if "meetings" in want:
-        tasks.append(sync_meetings(store, p, full="meetings" in asked or not swept_recently(store, "meetings", SEARCH_HOURS)))
+        named["meetings"] = sync_meetings(store, p, full="meetings" in asked or not swept_recently(store, "meetings", SEARCH_HOURS))
     if "bases" in want:
-        tasks.append(sync_bases(store, p))
+        named["bases"] = sync_bases(store, p)
 
     # A producer is also awaited here. A task can be awaited more than once, so this costs
     # nothing and removes the need to keep "who else awaits this" in step with the graph --
     # get that wrong and the task is simply abandoned when gather returns.
-    tasks += [t for t in (roster, messages, wiki, rosters) if t]
+    named |= {name: t for name, t in (("messages", messages), ("wiki", wiki), ("chats", rosters)) if t}
+    if roster:
+        named["roster"] = roster
 
     # One collection failing is not the sync failing. Without this a single LarkError that
     # nothing caught -- `sync_profiles` raised on a scope a tenant had not granted, which a
     # real install hit -- propagates out of `gather`, past `store.save_cursors()`, and out
     # of `watch`, which has nothing above it: the daemon stops on one optional scope. A
     # deliberate stop is the exception, and still is one.
-    for outcome in await gather(*tasks, return_exceptions=True):
+    #
+    # The failure is reported on the collection's own row. A row of its own would say it
+    # nowhere: both renderers walk the names they were given, and a name outside that list
+    # is simply not drawn -- which is the silent failure this whole guard exists to avoid.
+    for name, outcome in zip(named, await gather(*named.values(), return_exceptions=True), strict=True):
         if isinstance(outcome, SyncAbortedError | KeyboardInterrupt):
             raise outcome
         if isinstance(outcome, BaseException):
-            p.set("errors", state="error", note=cli.oneline(str(outcome), 70))
+            p.set(name, state="error", note=cli.oneline(f"{type(outcome).__name__}: {outcome}", 70))
     store.save_cursors()
     return store
