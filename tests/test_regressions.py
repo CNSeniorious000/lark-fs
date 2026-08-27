@@ -396,3 +396,27 @@ def test_every_codepoint_round_trips():
             loaded = safe_load(readable_yaml_dumps({"body": value, "after": "sentinel"}))
             assert loaded["body"] == value, f"U+{cp:04X} did not survive: {loaded['body']!r}"
             assert loaded["after"] == "sentinel", f"U+{cp:04X} restructured the document"
+
+
+def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
+    """`+search-user` answers with more than a profile: `chat_recency_hint` is relative to
+    now ("Contacted today") and `match_segments` echoes the query, so merging the row
+    wholesale rewrites meta.yaml on every sync and buries the roster's own `name`."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+get-user":
+            return {"user": {"tenant_key": "T"}}
+        ids = argv[argv.index("--user-ids") + 1].split(",")
+        return {"users": [{"open_id": i, "name": "", "localized_name": "Mia(张亚)", "chat_recency_hint": "Contacted today", "match_segments": [], "has_chatted": True} for i in ids]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "member_id": "ou_1", "name": "张亚", "tenant_key": "T"})
+
+    run(sync_module.sync_profiles(store, Progress()))
+
+    got = store.read_yaml("users/ou_1/meta.yaml")
+    assert got["localized_name"] == "Mia(张亚)", "the alias that disambiguates same-named people was not taken"
+    assert got["name"] == "张亚" and got["member_id"] == "ou_1", f"the roster's own fields were overwritten: {got}"
+    assert not {"chat_recency_hint", "match_segments", "has_chatted"} & got.keys(), f"volatile fields landed on disk: {got}"
