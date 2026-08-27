@@ -74,6 +74,9 @@ NASTY = {
     "only newlines": "\n\n",
     "empty first line": "\nsecond",
     "multiline plus control": " x\ny\x01z",
+    "hex literal": "0x1F",  # read back as 31 -- promplate/refined-mcp-servers#24
+    "binary literal": "0b1010",
+    "octal literal": "0o77",
 }
 
 

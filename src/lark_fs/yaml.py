@@ -195,6 +195,7 @@ RE_NEEDS_ESCAPE = compile(
     (?:
       ^$  # empty string
       | ^(?:null|~|true|false|yes|no|on|off)$  # keywords
+      | ^[-+]?(?:0x[0-9a-f_]+|0o[0-7_]+|0b[01_]+)$  # hex/octal/binary, or `0x1F` reads back as 31
       | ^[-+]?(?:[0-9][0-9_]*)?$  # integers
       | ^[-+]?(?:[0-9][0-9_]*)?\.[0-9_]*$  # floats
       | ^[-+]?(?:[0-9][0-9_]*)?(?:\.[0-9_]*)?[eE][-+]?[0-9]+$  # scientific notation
