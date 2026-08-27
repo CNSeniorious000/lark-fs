@@ -387,19 +387,25 @@ def test_a_message_body_is_not_always_a_string():
 
 def test_every_codepoint_round_trips():
     """A hand-picked set of nasty inputs is a guess about which characters are dangerous,
-    and the guess has been wrong twice: it covered C0 and missed C1, so a real message
+    and the guess has been wrong three times: it covered C0 and missed C1, so a real message
     carrying U+009A stayed unreadable through two rounds of repair; then it stopped at
-    U+2200 and missed the surrogates and U+FFFE/U+FFFF, which a reviewer had to point out.
+    U+2200 and missed the surrogates and U+FFFE/U+FFFF; then every shape it tried was a
+    mapping, so the BOM went unnoticed. All three were misses in the *range or the shapes*,
+    never in the reasoning about a character once it was actually tried.
 
     The shapes matter as much as the range. A character is only dangerous in some
-    positions -- ` a\nb` ends its block early, `\n a\n b` loses the spaces in silence --
-    so each codepoint is tried in five, including two that put a blank line first."""
+    positions -- ` a\nb` ends its block early, `\n a\n b` loses the spaces in silence,
+    and a BOM is content everywhere except offset 0 of the stream, which only a top-level
+    bare string reaches. So each codepoint is tried nested and bare."""
     for cp in range(0x11000):  # past the BMP, so the surrogates and noncharacters are in
         ch = chr(cp)
         for value in (f"x{ch}y", f"a\n{ch}b", f"\n {ch}c", f"\n  \n {ch}", f"{ch}\n a\n  b"):
             loaded = safe_load(readable_yaml_dumps({"body": value, "after": "sentinel"}))
             assert loaded["body"] == value, f"U+{cp:04X} in {value!r} did not survive: {loaded['body']!r}"
             assert loaded["after"] == "sentinel", f"U+{cp:04X} in {value!r} restructured the document"
+        # bare, with nothing in front of the value: the only way anything reaches offset 0
+        for value in (f"{ch}top", f"to{ch}p", f"{ch}first\nsecond"):
+            assert safe_load(readable_yaml_dumps(value)) == value, f"U+{cp:04X} in bare {value!r} did not survive"
 
 
 def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):

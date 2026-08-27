@@ -9,7 +9,10 @@ type JSON = dict[str, JSON] | list[JSON] | tuple[JSON, ...] | str | int | float 
 # and a hand-picked set of nasty inputs will not contain a character nobody types. Such a string
 # is written as a double-quoted scalar instead, where they survive as escapes -- dropping
 # them would lose part of a message that no later run can fetch back.
-RE_UNPRINTABLE = compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff\ufffe\uffff]")
+# The BOM is the odd one out: it survives in every position except offset 0, where the
+# reader takes it for an encoding signature and drops it. Only a top-level bare string
+# lands there, which is why sweeping `{"body": ...}` shapes alone never sees it.
+RE_UNPRINTABLE = compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ud800-\udfff\ufffe\uffff\ufeff]")
 
 
 def _quote_double(value: str) -> str:
