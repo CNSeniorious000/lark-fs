@@ -3,7 +3,8 @@
 from asyncio import Semaphore, create_task, gather, run, sleep
 from datetime import datetime
 from itertools import pairwise
-from re import findall
+
+from yaml import safe_load
 
 from lark_fs import cli
 from lark_fs.attachments import Policy, _pending, _settle
@@ -60,11 +61,34 @@ def test_urls_survive_entity_decoding():
     assert cli.unescape_entities(url) == "https://x.com/a?b=1&timestamp=2&notify=3&copy=4"
 
 
-def test_yaml_survives_control_characters():
-    """U+2028 reads as a line break inside a literal block and silently breaks its indentation."""
-    text = readable_yaml_dumps({"body": "first\u2028second\x1b[0m\nthird"})
-    assert findall(r"(?m)^\S", text) == ["b"], "a stray break would start a second top-level key"
-    assert "\u2028" not in text and "\x1b" not in text
+NASTY = {
+    "leading space": " test3@example.com\nbep!AX93sL!cv@3@",  # a real message; the block indent came from its first line
+    "percent": "%%%",  # a real message; % opens a YAML directive
+    "u2028": "first\u2028second",  # read as a line break inside a literal block
+    "control": "before\x07after\x1b[0m",
+    "nul": "a\x00b",
+    "crlf": "a\r\nb",
+    "tab": "a\tb\nc",
+    "backslash and quote": 'say "hi" \\ ok',
+    "trailing newlines": "body\n\n\n",
+    "only newlines": "\n\n",
+    "empty first line": "\nsecond",
+    "multiline plus control": " x\ny\x01z",
+}
+
+
+def test_yaml_round_trips_every_character_a_message_can_carry():
+    """The mirror parses its own output during reindex, and a message it cannot read back
+    is data loss no later run can repair -- the API will not return it again.
+
+    Nothing may be dropped to achieve that: this used to delete control characters and
+    U+2028 outright, which parses cleanly and silently returns a different message than
+    the one that was sent. A double-quoted scalar carries them as escapes instead."""
+    for name, value in NASTY.items():
+        text = readable_yaml_dumps({"body": value, "after": "sentinel"})
+        loaded = safe_load(text)
+        assert loaded["body"] == value, f"{name}: {loaded['body']!r} != {value!r}"
+        assert loaded["after"] == "sentinel", f"{name}: the document was restructured"
 
 
 def test_store_reads_back_what_it_wrote(tmp_path):

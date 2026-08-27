@@ -3,13 +3,17 @@ from re import IGNORECASE, VERBOSE, compile
 type JSON = dict[str, JSON] | list[JSON] | tuple[JSON, ...] | str | int | float | bool | None
 
 
-# YAML forbids most C0 controls, and treats U+2028/2029 as line breaks -- either one
-# inside a literal block silently corrupts the document's indentation structure.
-RE_UNSAFE = compile(r"[\x00-\x08\x0b-\x1f\x7f\u2028\u2029]")
+# A literal block cannot carry these: YAML forbids most C0 controls outright, and reads
+# U+2028/2029 as line breaks, which would silently restructure the document. Such a string
+# is written as a double-quoted scalar instead, where they survive as escapes -- dropping
+# them would lose part of a message that no later run can fetch back.
+RE_UNPRINTABLE = compile(r"[\x00-\x08\x0b-\x1f\x7f\u2028\u2029]")
 
 
-def _sanitize(text: str) -> str:
-    return RE_UNSAFE.sub(lambda m: "\n" if m.group() in "\u2028\u2029" else "", text)
+def _quote_double(value: str) -> str:
+    """Double-quoted style, the only YAML scalar that can carry an escape."""
+    out = value.replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + RE_UNPRINTABLE.sub(lambda m: f"\\u{ord(m.group()):04x}", out).replace("\n", "\\n") + '"'
 
 
 def readable_yaml_dumps(data: JSON):
@@ -56,7 +60,7 @@ def _serialize_dict(data: dict, lines: list[str], indent: int, prefix: str):
             else:
                 lines.append(f"{prefix}{key_str}:\n")
                 _serialize(value, lines, indent + 1)
-        elif isinstance(value, str) and "\n" in value:
+        elif isinstance(value, str) and "\n" in value and not RE_UNPRINTABLE.search(value):
             lines.append(f"{prefix}{key_str}:")
             _append_literal_block(value, lines, indent + 1)
         else:
@@ -81,7 +85,7 @@ def _serialize_list(data: list | tuple, lines: list[str], indent: int, prefix: s
             else:
                 lines.append(f"{prefix}-\n")
                 _serialize(item, lines, indent + 1)
-        elif isinstance(item, str) and "\n" in item:
+        elif isinstance(item, str) and "\n" in item and not RE_UNPRINTABLE.search(item):
             lines.append(f"{prefix}-")
             _append_literal_block(item, lines, indent + 1)
         else:
@@ -105,7 +109,7 @@ def _serialize_dict_in_list(data: dict, lines: list[str], indent: int, prefix: s
             else:
                 lines.append(f"{line_prefix}{key_str}:\n")
                 _serialize(value, lines, indent + 2)
-        elif isinstance(value, str) and "\n" in value:
+        elif isinstance(value, str) and "\n" in value and not RE_UNPRINTABLE.search(value):
             lines.append(f"{line_prefix}{key_str}:")
             _append_literal_block(value, lines, indent + 2)
         else:
@@ -114,7 +118,7 @@ def _serialize_dict_in_list(data: dict, lines: list[str], indent: int, prefix: s
 
 def _serialize_string(value: str, lines: list[str], prefix: str):
     """Serialize a string value (standalone, not as dict/list value)."""
-    if "\n" in value:
+    if "\n" in value and not RE_UNPRINTABLE.search(value):
         lines.append(f"{prefix}")
         _append_literal_block(value, lines, indent=1)
     else:
@@ -129,25 +133,34 @@ def _append_literal_block(value: str, lines: list[str], indent: int):
     - |- (strip): If no trailing newline
     - | (clip): If has single trailing newline with content
     - |+ (keep): If has multiple trailing newlines, or only newlines (no content)
+
+    An explicit indentation indicator is emitted whenever the block's first line begins
+    with a space. YAML otherwise reads the indentation of that first line as the block's
+    own, so every following line is *less* indented than the block claims and the block
+    ends there -- mid-message, with the rest of the file read as the enclosing mapping.
+    Two real messages did this, both starting with a space; the parse error lands several
+    lines later, which is why it reads as corruption rather than as a quoting bug.
     """
     block_prefix = "  " * indent
-    value = _sanitize(value)
 
     # Determine chomping indicator
     stripped_content = value.rstrip("\n")
     trailing_newlines = len(value) - len(stripped_content)
     if trailing_newlines == 0:
         # No trailing newlines: use strip
-        lines.append(" |-\n")
+        chomp = "-"
         stripped_value = value
     elif trailing_newlines == 1 and stripped_content:
         # Single trailing newline with content: use clip (default)
-        lines.append(" |\n")
+        chomp = ""
         stripped_value = stripped_content
     else:
         # Multiple trailing newlines, or only newlines (no content): use keep
-        lines.append(" |+\n")
+        chomp = "+"
         stripped_value = value
+
+    explicit = str(len(block_prefix)) if stripped_value.startswith(" ") else ""
+    lines.append(f" |{explicit}{chomp}\n")
 
     # Output content lines
     # Note: split("\n") on strings ending with \n produces a trailing empty
@@ -165,7 +178,8 @@ def _serialize_scalar(value: str | float | bool | None):
     elif isinstance(value, bool):
         return "true" if value else "false"
     elif isinstance(value, str):
-        value = _sanitize(value)
+        if RE_UNPRINTABLE.search(value) or "\n" in value:
+            return _quote_double(value)  # the only style that can carry them
         if not RE_NEEDS_ESCAPE.search(value):
             return value
         if "\\" not in value and value.count('"') < value.count("'"):
@@ -186,7 +200,7 @@ RE_NEEDS_ESCAPE = compile(
       | ^[-+]?(?:[0-9][0-9_]*)?(?:\.[0-9_]*)?[eE][-+]?[0-9]+$  # scientific notation
       | ^\.inf$|^\.nan$  # special floats
       | ^\s|\s$  # leading or trailing whitespace
-      | [:\[\]{},&*#?|<>!`@'\"\t\r\n-]  # special characters
+      | [:\[\]{},&*#?|<>!`@%'\"\t\r\n-]  # special characters, % included: it opens a directive
     )
     """,
     IGNORECASE | VERBOSE,
