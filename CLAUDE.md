@@ -13,6 +13,13 @@ Mirrors Feishu/Lark onto disk as a greppable, ID-addressed file tree, driving th
 - `uv run pytest tests` covers the failures that were silent. When adding one, revert the
   fix and watch it go red — a test that never failed proves nothing. Twice now a
   string-replace edit matched nothing and quietly "verified" an unchanged file.
+- Reverting the fix is not enough on its own: check the test *reaches* it. Three tests in
+  one day passed against their own mutation because they never ran the changed line —
+  `sync_bases` discovers through `cli.paginate` and not `cli.run`, so mocking the latter
+  left the record loop untouched; `run_with_tui` hands a non-tty run to `run_plain`, where
+  the exception propagates by itself; and a test of `Store.save_cursor` said nothing about
+  whether `recheck_messages` calls it. Assert something the path must have done — a file
+  it writes, a call it makes — before asserting the thing under test.
 - `m sync --only <collection>` to exercise one syncer against live data.
 - Test against real Feishu data, never mocks — every bug found here so far was a
   wrong field name or an undocumented pagination cap that a mock would have hidden.
