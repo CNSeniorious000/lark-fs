@@ -7,6 +7,7 @@ they re-list metadata (cheap) but skip fetching bodies for entities already on d
 """
 
 from asyncio import create_task, gather
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable, MutableMapping
 from contextlib import aclosing
 from datetime import UTC, datetime, timedelta, timezone
@@ -713,26 +714,41 @@ def _edit_signal(msg: dict) -> tuple:
     return (msg.get("update_time") or "", str(msg.get("content") or ""), bool(msg.get("updated")))
 
 
-async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, batch: int = 50):
-    """Re-verify recently synced messages, since edits and recalls leave no forward trace.
+async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, batch: int = 50, budget: int = 60):
+    """Re-verify already-synced messages, since edits and recalls leave no forward trace.
 
     `+messages-search` cannot filter by update time and never returns recalled messages,
-    but `+messages-mget` reports `update_time` per id. So we replay the ids we already
-    have from the last `window_days` and rewrite only what actually changed -- one request
-    per 50 messages, which is far cheaper than re-fetching the window.
+    but `+messages-mget` reports `update_time` per id. So we replay ids we already have and
+    rewrite only what actually changed -- one request per 50 messages, far cheaper than
+    re-fetching them.
+
+    `budget` batches per run, resumed from where the last one stopped. Replaying the whole
+    window every time was 2431 sequential requests on this store -- longer than the 30
+    minutes until the tier is due again, so the daemon never left it, at roughly 115k
+    requests a day against a monthly tenant quota. The cursor is the last id read rather
+    than an offset, because the id list shifts as messages arrive and age out.
+
+    Thread replies are included. They have no month directory to filter on, so the window
+    only narrows the main line; the cursor is what bounds the work either way.
     """
     cutoff = (datetime.now(UTC) - timedelta(days=window_days)).strftime("%Y-%m")
-    recent = sorted((f for f in (store.root / "chats").glob("*/messages/*/*.yaml") if f.parent.name >= cutoff), key=lambda f: f.parent.name, reverse=True)
-    if not recent:
+    files = [f for f in (store.root / "chats").glob("*/messages/*/*.yaml") if f.parent.name >= cutoff]
+    files += [f for f in (store.root / "chats").glob("*/threads/*/*.yaml") if f.stem != "meta"]
+    if not files:
         return
-    p.set("recheck", state="running", total=len(recent))
 
-    by_id = {f.stem: f for f in recent}
-    ids = list(by_id)
+    by_id = {f.stem: f for f in files}
+    ids = sorted(by_id)  # stable between runs, which is what makes resuming from an id mean anything
+    start = bisect_right(ids, store.cursors.get("recheck_after") or "")
+    slice_ = ids[start : start + budget * batch] or ids[: budget * batch]  # wrapped: begin again at the oldest
+    p.set("recheck", state="running", total=len(slice_), done=0, note=f"{len(ids)} in window")
+
+    # written by an earlier slice, and this one only sees its own ids -- rewriting the file
+    # from what came back here would erase every recall recorded before it
+    gone = {r["message_id"]: r for r in store.read_yaml_rows("recalled.yaml") if r.get("message_id")}
     changed = 0
-    recalled: list[dict] = []
-    for i in range(0, len(ids), batch):
-        chunk = ids[i : i + batch]
+    for i in range(0, len(slice_), batch):
+        chunk = slice_[i : i + batch]
         try:
             data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(chunk), "--no-reactions")
         except cli.LarkError:
@@ -743,8 +759,9 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
             if not (msg := returned.get(mid)):
                 # recalled: it is gone from the server, but the local copy is the only
                 # record left, so mark it rather than delete it
-                recalled.append({"message_id": mid, "path": str(by_id[mid].relative_to(store.root))})
+                gone[mid] = {"message_id": mid, "path": str(by_id[mid].relative_to(store.root))}
                 continue
+            gone.pop(mid, None)  # it answered: a record of its absence must not outlive it
             # mget returns a wider field set than search, so comparing whole payloads
             # would rewrite every file; the edit signal is update_time plus the body
             rel = str(by_id[mid].relative_to(store.root))
@@ -753,10 +770,11 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
                 merged = {**before, **_clean(msg)}
                 store.write_yaml(rel, merged)
                 changed += 1
-        p.bump("recheck", len(chunk), last=f"{changed} changed, {len(recalled)} recalled")
-    if recalled:
-        store.write_yaml("recalled.yaml", recalled)
-    p.set("recheck", state="done", note=f"{changed} updated, {len(recalled)} recalled")
+        p.bump("recheck", len(chunk), last=f"{changed} changed, {len(gone)} recalled")
+    store.write_yaml("recalled.yaml", [gone[k] for k in sorted(gone)])
+    store.cursors["recheck_after"] = slice_[-1] if slice_ else ""
+    store.save_cursors()
+    p.set("recheck", state="done", note=f"{changed} updated, {len(gone)} recalled, {len(ids)} in window")
 
 
 def _rows(payload: dict) -> list[dict]:

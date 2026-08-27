@@ -763,3 +763,70 @@ def test_splitting_stops_where_the_api_stops():
 
     run(_sweep_window(datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 7, 2, tzinfo=UTC), 150, always_full))
     assert len(asked) == 1, f"a one-day window was split further: {asked}"
+
+
+def test_the_recheck_walks_the_window_instead_of_replaying_it(tmp_path, monkeypatch):
+    """The daemon runs this tier every 30 minutes and it replayed every message in the
+    window each time -- 2431 sequential requests on the real store, which takes longer than
+    the 30 minutes until it is due again, so the daemon never left it. Roughly 115k requests
+    a day against a monthly tenant quota.
+
+    A cursor covers the same ground across runs. It stores the last id rather than an
+    offset, because the list shifts as messages arrive and age out."""
+    from lark_fs import sync as sync_module
+
+    asked: list[list[str]] = []
+
+    async def fake_run(*argv, **_):
+        chunk = argv[argv.index("--message-ids") + 1].split(",")
+        asked.append(chunk)
+        return {"messages": [{"message_id": m, "update_time": "1", "body": {}} for m in chunk]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    month = datetime.now(UTC).strftime("%Y-%m")
+    for i in range(10):
+        store.write_yaml(f"chats/oc_1/messages/{month}/om_{i:03}.yaml", {"message_id": f"om_{i:03}"})
+
+    run(sync_module.recheck_messages(store, Progress(), batch=2, budget=2))
+    first = [m for c in asked for m in c]
+    assert first == ["om_000", "om_001", "om_002", "om_003"], f"the budget was not honoured: {first}"
+
+    asked.clear()
+    run(sync_module.recheck_messages(store, Progress(), batch=2, budget=2))
+    assert [m for c in asked for m in c] == ["om_004", "om_005", "om_006", "om_007"], "the second run did not resume where the first stopped"
+
+    asked.clear()
+    run(sync_module.recheck_messages(store, Progress(), batch=2, budget=2))
+    run(sync_module.recheck_messages(store, Progress(), batch=2, budget=2))
+    assert "om_000" in [m for c in asked for m in c], "the cursor never wrapped, so the oldest messages are never re-verified"
+
+
+def test_a_recall_recorded_by_an_earlier_slice_survives_the_next(tmp_path, monkeypatch):
+    """`recalled.yaml` is the only record that a message is gone -- the local copy is kept
+    deliberately. A bounded pass only sees its own ids, so rewriting the file from what came
+    back erases every recall found before it. And a message that answers again must lose its
+    record, or it reads as recalled forever."""
+    from lark_fs import sync as sync_module
+
+    present: set[str] = set()
+
+    async def fake_run(*argv, **_):
+        chunk = argv[argv.index("--message-ids") + 1].split(",")
+        return {"messages": [{"message_id": m, "update_time": "1", "body": {}} for m in chunk if m in present]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    month = datetime.now(UTC).strftime("%Y-%m")
+    for i in range(4):
+        store.write_yaml(f"chats/oc_1/messages/{month}/om_{i:03}.yaml", {"message_id": f"om_{i:03}"})
+
+    run(sync_module.recheck_messages(store, Progress(), batch=2, budget=1))  # om_000, om_001 both gone
+    assert {r["message_id"] for r in store.read_yaml_rows("recalled.yaml")} == {"om_000", "om_001"}
+
+    run(sync_module.recheck_messages(store, Progress(), batch=2, budget=1))  # om_002, om_003 -- a different slice
+    assert {r["message_id"] for r in store.read_yaml_rows("recalled.yaml")} == {"om_000", "om_001", "om_002", "om_003"}, "an earlier slice's recalls were erased"
+
+    present = {"om_000", "om_001"}
+    run(sync_module.recheck_messages(store, Progress(), batch=2, budget=1))  # wraps back to om_000
+    assert {r["message_id"] for r in store.read_yaml_rows("recalled.yaml")} == {"om_002", "om_003"}, "a message that came back still reads as recalled"
