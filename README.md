@@ -137,7 +137,9 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
   once a day, profiles once a week. Naming one explicitly (`--only wiki`) always sweeps it.
 - **minutes / meetings** are found by walking month by month, because `+search` caps the
   total a query can return. A window that comes back at that ceiling is halved down to a
-  day, since a month is not always narrow enough.
+  day, since a month is not always narrow enough. A plain sync walks only this month and
+  the last — history does not grow backwards — and the walk over all of it is on the same
+  six-hour clock, for an entry that lands further back than expected.
 - **files** are skipped once their key's directory exists, including when it holds only
   the `.oversize` marker — which records the size that disqualified the file, so raising
   `max_mb` brings it back.
