@@ -53,7 +53,7 @@ def main():
         try:
             run(run_with_tui(lambda p: watch(args.root, p, Schedule(messages=args.interval)), rows))
         except SyncAbortedError, KeyboardInterrupt:
-            print("\n  stopped", file=stderr)
+            print(f"\n  stopped: {Aborted.reason}" if Aborted.reason else "\n  stopped", file=stderr)
         print(file=stderr)
         print_summary(Store(args.root))
         return
@@ -61,8 +61,9 @@ def main():
     try:
         store = run(run_with_tui(lambda p: sync_all(args.root, p, args.only), args.only))
     except SyncAbortedError, KeyboardInterrupt:
-        # cursors are committed per slice, so an interrupted run just resumes next time
-        print("\n  interrupted; rerun to resume", file=stderr)
+        # cursors are committed per slice, so an interrupted run just resumes next time --
+        # unless it stopped for a reason rerunning cannot clear, which only the stop knows
+        print(f"\n  stopped: {Aborted.reason}" if Aborted.reason else "\n  interrupted; rerun to resume", file=stderr)
         print_summary(Store(args.root))
         return
     print(file=stderr)

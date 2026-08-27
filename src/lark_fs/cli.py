@@ -174,6 +174,7 @@ class Aborted:
     no matter which collection is running."""
 
     flag = False
+    reason = ""  # why, when it was not a keystroke -- a stop the user cannot act on the same way
 
     @classmethod
     def check(cls):
@@ -307,6 +308,10 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None, subject: str
         exc = LarkError(list(argv), payload)
         if exc.is_quota_exhausted:
             Aborted.flag = True  # nothing will succeed until the month rolls over
+            # every collection catches LarkError, so the one that hit this swallows it and
+            # the run ends at the next checkpoint as a plain abort -- which reads as "rerun
+            # to resume", the one thing that cannot work until the 1st
+            Aborted.reason = "the tenant's monthly API quota is spent; it resets on the 1st"
             raise exc
         if not exc.is_rate_limited or attempt == retries - 1:
             raise exc

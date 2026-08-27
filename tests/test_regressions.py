@@ -926,3 +926,33 @@ def test_a_real_failure_is_not_reported_as_an_interruption(monkeypatch):
 
     with pytest.raises(RuntimeError, match=BUG):
         run(main())
+
+
+def test_a_quota_stop_does_not_read_as_a_rerunnable_interruption(monkeypatch):
+    """`99991403` is the tenant's *monthly* allowance, shared by every custom app in it and
+    cleared only on the 1st. Every collection catches LarkError, so the one that hits it
+    swallows it and the run ends at the next checkpoint as a plain abort -- which prints
+    "rerun to resume", the one thing that cannot work. Rerunning also burns next month."""
+    from lark_fs import cli as cli_module
+
+    monkeypatch.setattr(cli_module.Aborted, "flag", False)
+    monkeypatch.setattr(cli_module.Aborted, "reason", "")
+
+    async def quota_spent(*_a, **_k):
+        return b'{"ok": false, "error": {"code": 99991403, "message": "quota"}}', b""
+
+    class Proc:
+        returncode = 1
+        communicate = quota_spent
+
+    monkeypatch.setattr(cli_module, "create_subprocess_exec", lambda *_a, **_k: _done(Proc()))
+
+    with pytest.raises(cli.LarkError):
+        run(cli_module.run("im", "+chat-list"))
+
+    assert cli_module.Aborted.flag is True, "the run kept spending against an exhausted quota"
+    assert "monthly" in cli_module.Aborted.reason, f"the stop cannot be told from a keystroke: {cli_module.Aborted.reason!r}"
+
+
+async def _done(value):
+    return value
