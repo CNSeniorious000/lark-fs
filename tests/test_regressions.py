@@ -1,6 +1,7 @@
 """Regressions for failures that were silent -- each one shipped and produced plausible output."""
 
 from asyncio import Semaphore, create_task, gather, run, sleep
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
@@ -637,3 +638,56 @@ def test_a_table_that_paged_short_is_not_frozen_as_whole(tmp_path, monkeypatch):
 
     assert store.exists("bases/bas_1/tables/tbl_1/meta.yaml"), "the test never reached the record loop"
     assert not store.exists("bases/bas_1/tables/tbl_1/records.yaml"), "a partial table was frozen in place as the whole one"
+
+
+def test_a_failed_repair_request_does_not_clear_the_queue(tmp_path, monkeypatch):
+    """`messages_unreadable` is the only record that a file on disk cannot be parsed --
+    `reindex` builds it because scanning every message during a sync is far too slow. The
+    repair returned `[]` both when the server had dropped a message and when the request
+    itself failed, and the caller cleared the whole chunk either way. A rate limit there
+    dropped 50 still-broken files off the list, past a cursor that had already moved on."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+chat-list":
+            return {"chats": []}
+        raise cli.LarkError(list(argv), {"error": {"code": 99991400, "message": "rate limit"}})
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))
+    store = Store(tmp_path)
+    store.cursors["messages_unreadable"] = {"om_1": "chats/oc_1/messages/2026-08/om_1.yaml"}
+
+    run(sync_module.sync_messages(store, Progress(), chat_ids=set()))
+
+    assert store.cursors["messages_unreadable"] == {"om_1": "chats/oc_1/messages/2026-08/om_1.yaml"}, "a failed request emptied the repair queue"
+
+
+def test_the_media_index_is_durable_before_the_cursor_is(tmp_path, monkeypatch):
+    """Cursors are saved per chat; media rows lived in memory until every chat was done.
+    Interrupt in between -- ctrl-c, an exhausted quota, another collection raising -- and
+    the cursor is past messages whose attachments were never indexed. Nothing walks those
+    messages again, and only a full `reindex` finds them.
+
+    The interrupt lands the instant the cursor becomes durable, which is the only moment
+    that tells the two orderings apart."""
+    from lark_fs import sync as sync_module
+
+    msg = {"message_id": "om_1", "create_time": "2026-08-01 10:00", "chat_id": "oc_1", "msg_type": "file", "content": '<file key="file_v3_001_abc" name="a.txt">'}
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([msg]))
+
+    store = Store(tmp_path)
+    real_save, saved = store.save_cursors, []
+
+    def save_then_die():
+        real_save()
+        saved.append(1)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(store, "save_cursors", save_then_die)
+
+    with suppress(KeyboardInterrupt):
+        run(sync_module.sync_messages(store, Progress(), chat_ids={"oc_1"}))
+
+    assert saved, "the cursor never became durable, so the test proves nothing"
+    assert store.read_yaml_rows("chats/oc_1/media.yaml"), "the cursor outlived the media index it was supposed to follow"

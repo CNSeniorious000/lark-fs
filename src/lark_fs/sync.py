@@ -213,6 +213,12 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
             # slice of history is gone for good.
             newest = min(gap, high) if gap else high
         if newest and newest != since:
+            # The media index has to be durable before the cursor is. These rows only exist
+            # in memory until the sweep ends, and the cursor is written per chat -- so a
+            # ctrl-c, an exhausted quota, or any other collection raising in between leaves
+            # a cursor past messages whose attachments were never recorded. Nothing looks
+            # at those messages again; only a full `reindex` finds them.
+            _flush_media(store, [r for r in media if r.get("chat_id") == chat_id])
             # store one second past the last message, or every run re-reads it
             cursors[chat_id] = newest
             store.save_cursors()
@@ -237,11 +243,15 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         store.save_cursors()
 
     async def rewrite(chunk: list[tuple[str, str]]):
-        for msg in await repair_unreadable(store, chunk):
+        try:
+            fetched = await repair_unreadable(store, chunk)
+        except cli.LarkError:
+            return  # the request failed, not the messages: they stay queued for the next run
+        for msg in fetched:
             media.extend(_index_media(msg))
             _record_sender(store, msg, users)
         for mid, _ in chunk:
-            broken.pop(mid, None)  # a message the server no longer has is not coming back either
+            broken.pop(mid, None)  # asked for and not returned: recalled, and not coming back either
         p.set("messages", note=f"{total} messages, {len(broken)} unreadable files left")
 
     # The file is on disk but unparseable, so only the API still holds the real content.
@@ -385,13 +395,12 @@ async def repair_unreadable(store: Store, chunk: list[tuple[str, str]]) -> list[
     says nothing readable, so the API is the only place the message still exists. Takes
     (message_id, relative path) pairs, at most 50 -- what `+messages-mget` accepts.
 
-    Returns what came back, for the caller to index. A message the server no longer has
-    simply does not come back, and no amount of retrying will change that.
+    Returns what came back. A message the server no longer has simply does not come back,
+    and no amount of retrying will change that -- but a request that *failed* says nothing
+    about the messages in it, so the error is raised rather than reported as an empty
+    answer. Told apart only by the caller, which is what clears the repair list.
     """
-    try:
-        data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(mid for mid, _ in chunk), "--no-reactions")
-    except cli.LarkError:
-        return []
+    data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(mid for mid, _ in chunk), "--no-reactions")
     returned = {m["message_id"]: m for m in (data or {}).get("messages") or []}
     written = []
     for mid, rel in chunk:
