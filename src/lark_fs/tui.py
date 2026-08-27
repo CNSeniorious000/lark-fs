@@ -17,7 +17,7 @@ from prompt_toolkit.styles import Style
 from reactivity import derived, effect, signal
 
 from . import cli
-from .cli import SyncAbortedError, activity, link_for
+from .cli import activity, link_for
 from .sync import ALL, Progress, Row
 
 SPINNER = cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
@@ -247,7 +247,10 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     if interrupted:
         raise KeyboardInterrupt
     if isinstance(result, BaseException):
-        raise SyncAbortedError
+        # Whatever it was, it is what the caller needs. Rewriting every failure to
+        # SyncAbortedError made a missing scope, a crash and a stopped sync all print
+        # "interrupted; rerun to resume" -- the one message that says nothing is wrong.
+        raise result
     return result
 
 

@@ -273,7 +273,13 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
 
 
 async def _list_chats(store: Store) -> set[str]:
-    """Every chat the user belongs to. Falls back to whatever is already mirrored."""
+    """Every chat the user belongs to, plus whatever is already mirrored.
+
+    A listing that fails on its third page still returns two pages of chats, and taking
+    that as the answer silently drops every chat it had not reached yet -- for that whole
+    run, message sweep included. The disk is not a fallback for that case, it is the floor:
+    a chat that was mirrored once still exists whether or not this listing reached it.
+    """
     found: set[str] = set()
     try:
         async for chat in cli.paginate("im", "+chat-list", "--types", "p2p,group", key="chats"):
@@ -282,7 +288,7 @@ async def _list_chats(store: Store) -> set[str]:
                 store.write_yaml(f"chats/{cid}/meta.yaml", _clean(chat))
     except cli.LarkError:
         pass
-    return found or {d.name for d in (store.root / "chats").glob("oc_*")}
+    return found | {d.name for d in (store.root / "chats").glob("oc_*")}
 
 
 def _reason(e: cli.LarkError) -> str:

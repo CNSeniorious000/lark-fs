@@ -5,6 +5,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
+import pytest
 from yaml import safe_load
 
 from lark_fs import cli
@@ -878,3 +879,50 @@ def test_a_meeting_still_waiting_for_its_minute_is_asked_again(tmp_path):
     assert _meeting_detail_is_due(store, "m3") is False, "a detail that already has its minute was re-fetched"
 
     assert _meeting_detail_is_due(store, "m4") is True, "a meeting with no detail at all was skipped"
+
+
+def test_a_partial_chat_listing_does_not_shrink_the_sweep(tmp_path, monkeypatch):
+    """`+chat-list` failing on its third page still returns two pages, and taking that as
+    the answer drops every chat it had not reached -- for the whole run, message sweep
+    included, with nothing said about it. A chat mirrored once still exists whether or not
+    this listing reached it, so the disk is the floor and not a fallback."""
+    from lark_fs.sync import _list_chats
+
+    async def half_a_listing(*_a, **_k):
+        yield {"chat_id": "oc_new"}
+        raise cli.LarkError(["im", "+chat-list"], {"error": {"code": 99991400}})
+
+    monkeypatch.setattr(cli, "paginate", half_a_listing)
+    store = Store(tmp_path)
+    store.write_yaml("chats/oc_old/meta.yaml", {"chat_id": "oc_old"})
+
+    assert run(_list_chats(store)) == {"oc_new", "oc_old"}, "a chat already on disk was dropped by a listing that never reached it"
+
+
+BUG = "a real bug"
+
+
+def test_a_real_failure_is_not_reported_as_an_interruption(monkeypatch):
+    """Every exception out of the sync was rewritten to SyncAbortedError, and `main` prints
+    "interrupted; rerun to resume" for that -- the one message that says nothing is wrong.
+    A missing scope, a crash and a stopped sync all looked identical.
+
+    Only the TTY path does the rewriting, so the test has to take it: a non-tty run goes
+    to `run_plain`, where the exception propagates on its own and proves nothing."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from lark_fs.tui import run_with_tui
+
+    monkeypatch.setattr("lark_fs.tui.stderr", type("T", (), {"isatty": lambda _s: True})())
+
+    async def explode(_p):
+        raise RuntimeError(BUG)
+
+    async def main():
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+            return await run_with_tui(explode, ["messages"])
+
+    with pytest.raises(RuntimeError, match=BUG):
+        run(main())
