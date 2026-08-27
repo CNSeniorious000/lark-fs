@@ -529,7 +529,7 @@ def _wiki_aliases(store: Store) -> dict[str, str]:
 
 
 def swept_recently(store: Store, name: str, hours: float) -> bool:
-    """Has this discovery pass run within `hours`? Records the sweep when it has not.
+    """Has this discovery pass run within `hours`?
 
     Measured over one full sync: 442 of 1247 requests were the wiki tree walk and 248 were
     the doc search probes -- 55% of the run, spent rediscovering corpora that barely move.
@@ -540,12 +540,19 @@ def swept_recently(store: Store, name: str, hours: float) -> bool:
     An explicit `--only wiki` always sweeps: asking for a collection by name is asking for
     it now, and this only governs what a plain `sync` does on its own initiative.
     """
-    now = datetime.now(UTC)
-    swept: dict[str, str] = store.cursors.setdefault("swept", {})
-    if (last := swept.get(name)) and datetime.fromisoformat(last) > now - timedelta(hours=hours):
-        return True
-    swept[name] = now.isoformat(timespec="seconds")
-    return False
+    last = store.cursors.setdefault("swept", {}).get(name)
+    return bool(last) and datetime.fromisoformat(last) > datetime.now(UTC) - timedelta(hours=hours)
+
+
+def record_sweep(store: Store, name: str):
+    """Stamp a pass as swept -- only once it has actually swept.
+
+    Stamping on the way in instead is the same line of code and reads the same, but a pass
+    that dies on its first request then coasts the whole window having fetched nothing: one
+    rate-limited `+space-list` costs a day of wiki, not a run of it. Failure has to come
+    due sooner than success, not at the same time.
+    """
+    store.cursors.setdefault("swept", {})[name] = datetime.now(UTC).isoformat(timespec="seconds")
 
 
 async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = None, search: bool = True):
@@ -553,6 +560,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     p.set("docs", state="running")
     seen: dict[str, dict] = {}
     alias = _wiki_aliases(store)
+    probed = search and not queries  # a custom query set sweeps a different corpus; it is not the scheduled pass
     for q in queries or DOC_QUERIES if search else ():
         try:
             async for r in cli.paginate("drive", "+search", "--query", q, key="results"):
@@ -569,7 +577,11 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "token": token, "entity_type": r.get("entity_type"), "title": title})
                 p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:
+            probed = False  # a query that never answered leaves a hole; come back sooner than the full window
             continue
+
+    if probed:
+        record_sweep(store, "docs")
 
     # wiki nodes point at real documents and are enumerated exhaustively, unlike search
     for node in store.glob_rows("wiki/*/nodes.yaml"):
@@ -883,11 +895,15 @@ async def sync_wiki(store: Store, p: Progress):
             p.set("wiki", done=len(found), total=len(found) + len(frontier), note=f"{len(frontier)} branches queued")
         return found, whole
 
+    complete = True
+
     async def one(space: dict):
+        nonlocal complete
         if not (sid := space.get("space_id")):
             return
         store.write_yaml(f"wiki/{sid}/meta.yaml", space)
         nodes, whole = await walk(sid)
+        complete &= whole
         rel = f"wiki/{sid}/nodes.yaml"
         # A partial walk must not overwrite a complete one. This node list is the only
         # place a wiki node_token can be resolved to the document it points at, and one
@@ -897,6 +913,8 @@ async def sync_wiki(store: Store, p: Progress):
         p.set("wiki", note=f"{len(nodes)} nodes" + ("" if whole else ", partial -- kept the copy on disk"))
 
     await cli.spread(one, items)
+    if complete:  # a partial walk already refuses to overwrite the copy on disk; it must not claim the window either
+        record_sweep(store, "wiki")
     p.set("wiki", state="done")
 
 

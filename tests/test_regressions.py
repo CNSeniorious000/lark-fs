@@ -10,7 +10,7 @@ from lark_fs import cli
 from lark_fs.attachments import Policy, _pending, _settle
 from lark_fs.reindex import reindex
 from lark_fs.store import Store
-from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _edit_signal, _index_media, _note_tenant, _wiki_aliases, _windows, _write_thread, migrate_threads, swept_recently
+from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _edit_signal, _index_media, _note_tenant, _wiki_aliases, _windows, _write_thread, migrate_threads, record_sweep, swept_recently
 from lark_fs.yaml import JSON, readable_yaml_dumps
 
 
@@ -438,6 +438,7 @@ def test_a_discovery_pass_coasts_but_an_explicit_request_never_does(tmp_path):
     a ranked slice. Frequency is the only lever, so a plain sync lets them coast."""
     store = Store(tmp_path)
     assert swept_recently(store, "wiki", 24) is False, "never swept, so it is due"
+    record_sweep(store, "wiki")
     assert swept_recently(store, "wiki", 24) is True, "just swept, so it coasts"
     assert swept_recently(store, "docs", 24) is False, "each pass keeps its own clock"
 
@@ -445,7 +446,7 @@ def test_a_discovery_pass_coasts_but_an_explicit_request_never_does(tmp_path):
 def test_a_sweep_comes_due_again(tmp_path):
     """A clock that never expires is not a schedule, it is a one-shot."""
     store = Store(tmp_path)
-    swept_recently(store, "wiki", 24)
+    record_sweep(store, "wiki")
     store.cursors["swept"]["wiki"] = (datetime.now(UTC) - timedelta(hours=25)).isoformat(timespec="seconds")
     assert swept_recently(store, "wiki", 24) is False
 
@@ -488,3 +489,22 @@ def test_a_sheet_is_asked_for_as_a_sheet(tmp_path, monkeypatch):
     assert asked == [("tok1", "sheet")], f"a sheet was not asked for as a sheet: {asked}"
     assert store.exists("docs/tok1/comments.yaml"), "the body fetch failing took the comments with it"
     assert store.exists("docs/tok1/.nobody"), "a document that can never have a body was left due"
+
+
+def test_a_failed_sweep_does_not_claim_its_window(tmp_path, monkeypatch):
+    """The stamp used to go down on the way in, so a pass that died on its first request
+    coasted the whole window having fetched nothing -- one rate-limited `+space-list` cost
+    a day of wiki instead of a run of it. Failure has to come due sooner than success."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        raise cli.LarkError(list(argv), {"error": {"code": 99991400, "message": "rate limit"}})
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+
+    run(sync_module.sync_wiki(store, Progress()))
+    assert swept_recently(store, "wiki", 24) is False, "a wiki walk that fetched nothing claimed the day anyway"
+
+    run(sync_module.sync_docs(store, Progress(), search=True))
+    assert swept_recently(store, "docs", 6) is False, "a search that answered nothing claimed the window anyway"
