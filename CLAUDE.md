@@ -99,7 +99,27 @@ not one that only shows in a transient state:
   begins — a workspace whose history starts this year was otherwise spending 85% of its
   requests on empty months, every sync.
 
-- One entity per file, named by its Lark ID. Cross-references are raw IDs, never paths.
+- One entity per file, named by its Lark ID, wherever the entity has an ID of its own.
+  Cross-references are raw IDs, never paths. The exceptions are collections the API hands
+  over as a block and that are only ever read as one — a Base table's records, a wiki
+  space's nodes, a chat's media index — which are one sequence file merged by key.
+- A negative has to say why it is one. `.nobody`, `.nocomments` and `.oversize` all mean
+  "do not ask again", and each of them once meant that for a reason that stopped being
+  true: an empty document was written into, a size cap was raised, a token was asked for
+  under the wrong `--type`. A marker that records only *that* it was written cannot be
+  told apart from a permanent verdict, so 423 documents lost their comments and every
+  sheet was re-fetched forever. Write the reason; read it back before trusting it.
+- A cursor must never outlive the work it stands for. It is committed per chat while the
+  media rows it produced were still in memory, so an interrupt in between left a cursor
+  past messages whose attachments were never indexed — and nothing walks those again.
+  Write the derived thing first, then the cursor.
+- An answer at its ceiling is not an answer. `+search` caps the total a query returns, so
+  a window that comes back full is the first N of an unknown number and the rest are
+  unreachable through it. Split the window until one comes back under the cap; a month of
+  meetings already exceeds 150.
+- What an error *means* is the caller's to decide. `repair_unreadable` returned `[]` both
+  when the server had dropped a message and when the request failed, and the caller
+  cleared its repair queue either way. Raise, and let whoever knows the difference act.
 - Structured data is YAML via `yaml.py` (literal blocks for multi-line text) so message
   bodies stay greppable as plain lines. Never write JSON for entity data.
 - `Progress` rows are reactive: replace the whole row dict, never mutate in place, or

@@ -38,9 +38,12 @@ enough to start, and two extra scopes are worth asking for:
 lark-cli auth login --scope "im:chat:read im:chat.members:read"
 ```
 
-Both are optional — messages come from the global search endpoint, so a sync works
-without them; they add chat listing (including quiet chats the message sweep never sees)
-and the member roster that populates `users/`.
+`im:chat:read` is not optional: messages are walked per chat, so a first sync with no
+chats listed mirrors nothing. (The global message-search endpoint would not need it, but
+it caps at 800 messages per query however the window is sliced, so it is not used.)
+`im:chat.members:read` adds the member roster that populates `users/`, and
+`contact:user:search` fills in the alias that tells two same-named colleagues apart —
+without it the `profiles` pass reports that it could not run.
 
 ## Usage
 
@@ -56,8 +59,9 @@ lark-fs reindex                   # rebuild users/ and media.yaml from messages 
 The store defaults to `./lark-data`. Override with `--root` or `LARK_FS_ROOT` — the
 latter is the way to keep one store while running from anywhere.
 
-Every command is resumable: cursors are committed as the sweep advances, so an
-interrupted run picks up where it stopped rather than starting over.
+The message sweep is resumable: each chat's cursor is committed as it advances, so an
+interrupted run picks up where it stopped rather than starting over. The other
+collections resume by what is already on disk instead — see Incrementality.
 
 ## Why a file tree
 
@@ -80,7 +84,7 @@ instead of being buried in `\n` escapes.
 
 ```
 <root>/
-  .lark-fs/cursors.json               # per-collection incremental cursors
+  .lark-fs/cursors.json               # per-chat message cursors, sweep clocks, repair queues
   .lark-fs/config.toml                # which attachment kinds to mirror, and a size cap
   chats/<chat_id>/
     meta.yaml  members.yaml  media.yaml    # image/file keys referenced by this chat
@@ -125,9 +129,21 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
   windows that page in parallel — one alert bot's chat holds 181875 messages, which is
   3600+ pages if walked as a single sequence.
 - **docs / minutes / meetings** re-list metadata (cheap) but skip fetching bodies,
-  transcripts and comments for entities already on disk.
+  transcripts and comments for entities already on disk. A doc's body is re-fetched when
+  the server's `update_time` passes the copy on disk.
+- **discovery passes have no incremental signal to offer at all** — a wiki node carries no
+  update time and a search returns a ranked slice with no cursor — so they run on a clock
+  instead: the wiki tree once a day, the doc search probes every six hours, chat rosters
+  once a day, profiles once a week. Naming one explicitly (`--only wiki`) always sweeps it.
+- **minutes / meetings** are found by walking month by month, because `+search` caps the
+  total a query can return. A window that comes back at that ceiling is halved down to a
+  day, since a month is not always narrow enough.
 - **files** are skipped once their key's directory exists, including when it holds only
-  the `.oversize` marker.
+  the `.oversize` marker — which records the size that disqualified the file, so raising
+  `max_mb` brings it back.
+- **`watch` also re-verifies** already-synced messages, since edits and recalls leave no
+  forward trace. It walks that window with a cursor rather than replaying it, so the tier
+  costs a fixed 60 requests per run and covers everything about once a day.
 - Requests are capped at 8 concurrent and retry with exponential backoff on 429. Each
   collection bounds its own in-flight work, or one of them would own the whole queue.
 
@@ -139,7 +155,9 @@ collection, so CI still sees progress.
 ## Reindexing
 
 `users/` and each chat's `media.yaml` are projections of the message files, so they can
-be rebuilt locally when the extraction rules change — no API calls, no rate limit:
+be refreshed locally when the extraction rules change — no API calls, no rate limit. Rows
+are merged by key rather than replaced, so a reference to something no longer on disk
+survives; delete the projection first if you want it rebuilt from nothing:
 
 ```sh
 lark-fs reindex --root lark-data
