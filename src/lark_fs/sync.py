@@ -81,11 +81,16 @@ SLICE_HOURS = 12
 # over a full tree: at 8 it lost 315 nodes to 35 rate limits; at 3 it walked all 2366 with
 # none, for 108s instead of 43s. A tree walked once a day can afford the difference.
 WIKI_WIDTH = 3
-# How long a discovery pass may coast before a plain `sync` runs it again. Neither has an
-# incremental signal to offer, so this is the only lever on what they cost -- and the wiki
-# comment above already says a tree walked once a day can afford its width.
+# How long a pass that has no incremental signal of its own may coast before a plain `sync`
+# runs it again. Neither the wiki walk nor the doc search has one to offer, so this is the
+# only lever on what they cost -- and the wiki comment above already says a tree walked once
+# a day can afford its width. Rosters and profiles are here for a different reason: people
+# join, leave and are renamed, and "the file exists" says nothing about any of that.
 WIKI_HOURS = 24.0
 SEARCH_HOURS = 6.0
+ROSTER_HOURS = 24.0  # one request per chat, 200 on this store
+PROFILE_HOURS = 168.0  # one per 19 users, and a name or a department moves far more slowly than a roster
+MEETING_SETTLE_DAYS = 7  # a minute appears only once the recording is processed, well after the meeting ends
 STAMP = "%Y-%m-%d %H:%M"  # what the API both returns in create_time and accepts in --start/--end
 TENANT_TZ = timezone(timedelta(hours=8))  # the same offset as TZ, as a clock rather than a suffix
 
@@ -432,23 +437,31 @@ def _index_media(msg: dict) -> list[dict]:
 async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
     """Chat rosters. Metadata already landed when messages listed the chats.
 
-    Membership is the part only this pass can get, and it is the expensive part, so a
-    chat whose roster is already on disk is skipped entirely.
+    Membership is the part only this pass can get, and it is the expensive part, so a chat
+    whose roster is on disk is skipped -- but only until the clock comes due. People join,
+    leave and change their names, and "the file exists" is not a statement about any of
+    that: it froze the first roster ever fetched as the permanent one. Refreshing costs one
+    request per chat, 200 on this store, which is why it is a day rather than a run.
     """
     p.set("chats", state="running")
     known = chat_ids or {d.name for d in (store.root / "chats").glob("oc_*")}
-    todo = [c for c in known if not store.exists(f"chats/{c}/members.yaml")]
+    stale = not swept_recently(store, "rosters", ROSTER_HOURS)
+    todo = [c for c in known if stale or not store.exists(f"chats/{c}/members.yaml")]
     p.set("chats", total=len(todo), note=f"{len(known)} chats")
     if not todo:
         p.set("chats", state="done", note=f"{len(known)} chats, rosters up to date")
         return
 
+    reached = 0
+
     async def one(chat_id: str):
+        nonlocal reached
         try:
             members = await cli.run("im", "+chat-members-list", "--chat-id", chat_id, "--page-all")
         except cli.LarkError:
             p.bump("chats")  # p2p chats and ones we lack scope for simply have no roster
             return
+        reached += 1
         store.write_yaml(f"chats/{chat_id}/members.yaml", _clean(members))
         # bots and users share one directory, and only 67 of 81 bots seen carry app_id -- without
         # this flag the other 14 are indistinguishable from people once on disk
@@ -459,6 +472,8 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
         p.bump("chats", last=f"{len(people)} members")
 
     await cli.spread(one, todo)
+    if stale and reached:
+        record_sweep(store, "rosters")
     p.set("chats", state="done", note=f"{len(known)} chats")
 
 
@@ -483,7 +498,10 @@ async def sync_profiles(store: Store, p: Progress):
     p.set("profiles", state="running")
     tenant = (((await cli.run("contact", "+get-user")) or {}).get("user") or {}).get("tenant_key")
     on_disk = {d.name: store.read_yaml(f"users/{d.name}/meta.yaml") for d in (store.root / "users").glob("ou_*")}
-    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and "localized_name" not in u]
+    # a resolved profile is not a permanent one: an email, a department and an activation
+    # state all change, and "localized_name is present" was reading as "done for good"
+    stale = not swept_recently(store, "profiles", PROFILE_HOURS)
+    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and (stale or "localized_name" not in u)]
     p.set("profiles", total=len(todo), note=f"{len(on_disk)} known")
     if not todo:
         p.set("profiles", state="done", note="up to date")
@@ -503,6 +521,8 @@ async def sync_profiles(store: Store, p: Progress):
         p.bump("profiles", len(batch))
 
     await cli.spread(one, [todo[i : i + BATCH] for i in range(0, len(todo), BATCH)])
+    if stale and resolved:
+        record_sweep(store, "profiles")
     # the shortfall is deactivated accounts and bots, which never resolve and so are asked
     # for on every run -- cheap enough at one request per 19, and they come back if rehired
     p.set("profiles", state="done", note=f"{resolved}/{len(todo)} resolved")
@@ -919,7 +939,7 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = ""):
         p.set("meetings", done=scanned, note=f"scanning {month:%Y-%m} · {len(ids)} found")
         month = nxt
 
-    todo = [i for i in sorted(ids) if not store.exists(f"meetings/{i}/detail.yaml")]
+    todo = [i for i in sorted(ids) if _meeting_detail_is_due(store, i)]
     p.set("meetings", done=0, total=len(todo), note=f"fetching details · {len(ids)} meetings")
 
     async def details(batch: list[str]):
@@ -934,6 +954,24 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = ""):
 
     await cli.spread(details, [todo[i : i + 20] for i in range(0, len(todo), 20)])
     p.set("meetings", state="done", note=f"{len(ids)} meetings")
+
+
+def _meeting_detail_is_due(store: Store, mid: str) -> bool:
+    """True when there is no detail yet, or the one on disk was taken too early to have one.
+
+    `minute_token` and `note_id` appear only once the recording has been processed, which
+    is after the meeting ends -- so a detail fetched while it was still running never has
+    them, and "the file exists" froze that. Only a meeting recent enough to still be
+    waiting is worth another look: measured, 133 of 842 have no minute at all and the API
+    says so outright in `hint`, so asking those again buys nothing forever.
+    """
+    detail = store.read_yaml(f"meetings/{mid}/detail.yaml")
+    if not detail:
+        return True
+    if detail.get("minute_token") or detail.get("note_id"):
+        return False
+    end = str(detail.get("end_time") or "")
+    return bool(end and end > (datetime.now(TENANT_TZ) - timedelta(days=MEETING_SETTLE_DAYS)).strftime(STAMP))
 
 
 async def sync_bases(store: Store, p: Progress):

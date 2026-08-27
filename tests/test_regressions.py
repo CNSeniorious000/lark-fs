@@ -830,3 +830,51 @@ def test_a_recall_recorded_by_an_earlier_slice_survives_the_next(tmp_path, monke
     present = {"om_000", "om_001"}
     run(sync_module.recheck_messages(store, Progress(), batch=2, budget=1))  # wraps back to om_000
     assert {r["message_id"] for r in store.read_yaml_rows("recalled.yaml")} == {"om_002", "om_003"}, "a message that came back still reads as recalled"
+
+
+def test_a_roster_on_disk_is_not_a_roster_forever(tmp_path, monkeypatch):
+    """People join, leave and are renamed. `members.yaml` existing said nothing about any
+    of that, so the first roster ever fetched was the permanent one -- and the pass reported
+    "rosters up to date" while it was wrong."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        asked.append(argv[argv.index("--chat-id") + 1])
+        return {"users": [{"member_id": "ou_1", "name": "after"}]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("chats/oc_1/members.yaml", {"users": [{"member_id": "ou_1", "name": "before"}]})
+
+    run(sync_module.sync_chat_meta(store, Progress(), {"oc_1"}))
+    assert asked == ["oc_1"], "a roster that had never been refreshed was skipped"
+    assert store.read_yaml("chats/oc_1/members.yaml")["users"][0]["name"] == "after"
+
+    asked.clear()
+    run(sync_module.sync_chat_meta(store, Progress(), {"oc_1"}))
+    assert asked == [], "the clock did not hold; every sync would re-fetch every roster"
+
+
+def test_a_meeting_still_waiting_for_its_minute_is_asked_again(tmp_path):
+    """`minute_token` appears only once the recording is processed, after the meeting ends,
+    so a detail fetched while it was running never has one. But a meeting the API has
+    already answered for -- 133 of 842 have no minute at all and it says so in `hint` --
+    must not be asked forever."""
+    from lark_fs.sync import TENANT_TZ, _meeting_detail_is_due
+
+    store = Store(tmp_path)
+    just_ended = (datetime.now(TENANT_TZ) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    long_over = (datetime.now(TENANT_TZ) - timedelta(days=90)).strftime("%Y-%m-%d %H:%M")
+
+    store.write_yaml("meetings/m1/detail.yaml", {"end_time": just_ended})
+    assert _meeting_detail_is_due(store, "m1") is True, "a meeting that just ended was frozen without its minute"
+
+    store.write_yaml("meetings/m2/detail.yaml", {"end_time": long_over})
+    assert _meeting_detail_is_due(store, "m2") is False, "a meeting that will never have a minute is asked forever"
+
+    store.write_yaml("meetings/m3/detail.yaml", {"end_time": just_ended, "minute_token": "obc_1"})
+    assert _meeting_detail_is_due(store, "m3") is False, "a detail that already has its minute was re-fetched"
+
+    assert _meeting_detail_is_due(store, "m4") is True, "a meeting with no detail at all was skipped"
