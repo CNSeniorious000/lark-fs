@@ -383,3 +383,16 @@ def test_a_message_body_is_not_always_a_string():
     msg = {"message_id": "om_1", "chat_id": "oc_1", "content": 147399225000731836122715425445934994596181150067}
     assert _index_media(msg) == []
     assert _edit_signal(msg) == ("", "147399225000731836122715425445934994596181150067", False)
+
+
+def test_every_codepoint_round_trips():
+    """A hand-picked set of nasty inputs is a guess about which characters are dangerous,
+    and it guessed wrong: it covered the C0 controls and missed C1 entirely, so a real
+    message carrying U+009A stayed unreadable through two rounds of repair. Sweeping the
+    range instead is what found the boundary."""
+    for cp in range(0x2200):
+        ch = chr(cp)
+        for value in (f"x{ch}y", f"a\n{ch}b"):  # the scalar path and the literal-block path
+            loaded = safe_load(readable_yaml_dumps({"body": value, "after": "sentinel"}))
+            assert loaded["body"] == value, f"U+{cp:04X} did not survive: {loaded['body']!r}"
+            assert loaded["after"] == "sentinel", f"U+{cp:04X} restructured the document"

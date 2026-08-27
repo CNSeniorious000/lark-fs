@@ -430,7 +430,9 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
             p.bump("chats")  # p2p chats and ones we lack scope for simply have no roster
             return
         store.write_yaml(f"chats/{chat_id}/members.yaml", _clean(members))
-        people = ((members or {}).get("users") or []) + ((members or {}).get("bots") or [])
+        # bots and users share one directory, and only 67 of 81 bots seen carry app_id -- without
+        # this flag the other 14 are indistinguishable from people once on disk
+        people = ((members or {}).get("users") or []) + [{**b, "is_bot": True} for b in ((members or {}).get("bots") or [])]
         for u in people:
             if oid := u.get("member_id") or u.get("open_id"):
                 store.write_yaml(f"users/{oid}/meta.yaml", _clean({"open_id": oid, **u}))
