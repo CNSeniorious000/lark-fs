@@ -878,15 +878,21 @@ async def sync_bases(store: Store, p: Progress):
                 continue  # records are re-pulled only on demand; full-table diffing is a later concern
             # +record-list is offset-based (not page-token) and defaults to a markdown table
             rows: list[dict] = []
+            whole = True
             while True:
                 try:
                     recs = await cli.run("base", "+record-list", "--base-token", app_token, "--table-id", tid, "--limit", "200", "--offset", str(len(rows)))
                 except cli.LarkError:
+                    whole = False
                     break
                 rows += _rows(recs or {})
                 if not (recs or {}).get("has_more"):
                     break
-            store.write_yaml(rel, _clean(rows))
+            # A half table written here is permanent -- `store.exists(rel)` above skips the
+            # file forever after, so one rate-limited page in the middle freezes the first
+            # 400 rows in place as if they were the whole thing.
+            if whole:
+                store.write_yaml(rel, _clean(rows))
         p.bump("bases")
 
     await cli.spread(one, tokens)

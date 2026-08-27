@@ -591,3 +591,49 @@ def test_an_unresolved_wiki_hit_is_addressed_as_a_wiki_node(tmp_path, monkeypatc
 async def _aiter(items):
     for item in items:
         yield item
+
+
+def test_a_quoted_value_is_parsed_not_stripped(tmp_path):
+    """`_rows` is a hand-rolled reader -- a real YAML parser on a 40k-row media index is
+    seconds instead of milliseconds -- but it only stripped the quote characters. A
+    single-quoted scalar doubles its own quote and a double-quoted one carries escapes, so
+    stripping returns a different string than was written.
+
+    The mirror already holds one: an attachment named `... C'est l'application ....mp4`,
+    which `readable_yaml_dumps` writes double-quoted and which came back with the quotes
+    themselves inside the filename -- and that name is what the file is saved as."""
+    store = Store(tmp_path)
+    names = [
+        "Si toi aussi tu veut télécharger C'est l'application ... #fyp.mp4",  # real, chats/oc_6de932.../media.yaml
+        'say "hi".txt',
+        "back\\slash.txt",
+        "plain.txt",
+        "0x1F",  # quoted for a different reason: it would read back as the integer 31
+    ]
+    rows = [{"key": f"file_{i}", "name": n} for i, n in enumerate(names)]
+    store.write_yaml("chats/oc_1/media.yaml", rows)
+
+    assert [r["name"] for r in store.read_yaml_rows("chats/oc_1/media.yaml")] == names
+
+
+def test_a_table_that_paged_short_is_not_frozen_as_whole(tmp_path, monkeypatch):
+    """`records.yaml` is written once and skipped forever after -- so a rate limit on the
+    third page used to persist the first 200 rows as if they were the table. Nothing on
+    disk says otherwise and no later run looks again."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+table-list":
+            return {"tables": [{"id": "tbl_1"}]}
+        if argv[argv.index("--offset") + 1] == "0":
+            return {"fields": ["a"], "data": [["1"]], "record_id_list": ["rec_1"], "has_more": True}
+        raise cli.LarkError(list(argv), {"error": {"code": 99991400, "message": "rate limit"}})
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"result_meta": {"token": "bas_1", "doc_types": "BITABLE"}}]))
+    store = Store(tmp_path)
+
+    run(sync_module.sync_bases(store, Progress()))
+
+    assert store.exists("bases/bas_1/tables/tbl_1/meta.yaml"), "the test never reached the record loop"
+    assert not store.exists("bases/bas_1/tables/tbl_1/records.yaml"), "a partial table was frozen in place as the whole one"

@@ -94,6 +94,22 @@ class Store:
         return sum(1 for _ in self.root.glob(pattern))
 
 
+def _unquote(value: str) -> str:
+    """Undo whatever `_serialize_scalar` quoted this with.
+
+    Stripping the quote characters is not the same thing. A single-quoted scalar doubles its
+    own quote, and a double-quoted one is the only style carrying escapes -- so a real
+    attachment named `C'est l'application ....mp4` came back with its double quotes still
+    attached and became part of the filename, and a backslash came back wrong. The parser
+    is only paid for on a value that was quoted, which in a 40k-row index is a handful.
+    """
+    if value.startswith('"'):
+        return safe_load(value)
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
+    return value
+
+
 def _rows(text: str) -> list[dict]:
     """Parse the flat `- key: value` shape the sequence writers emit -- enough to merge
     across runs without a YAML parser, which on a 40k-row media index is the difference
@@ -109,5 +125,5 @@ def _rows(text: str) -> list[dict]:
             continue
         key, _, value = line.partition(": ")
         if rows and key:
-            rows[-1][key] = value.strip().strip("'")
+            rows[-1][key] = _unquote(value.strip())
     return rows
