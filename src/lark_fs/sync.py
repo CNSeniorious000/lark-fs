@@ -1123,7 +1123,7 @@ async def sync_bases(store: Store, p: Progress):
 
     async def one(app_token: str):
         try:
-            tables = await cli.run("base", "+table-list", "--base-token", app_token)
+            tables = await cli.run("base", "+table-list", "--base-token", app_token, "--limit", "100")
         except cli.LarkError:
             return
         for t in (tables or {}).get("tables") or []:
