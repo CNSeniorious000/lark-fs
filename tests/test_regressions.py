@@ -1472,3 +1472,27 @@ def test_a_thousand_members_is_not_a_whole_roster(tmp_path, monkeypatch):
     assert argvs, "no roster was asked for at all"
     for argv in argvs:
         assert "--page-all" in argv and argv[argv.index("--page-limit") + 1] == "0", f"the page cap is still in place: {argv}"
+
+
+def test_a_bitable_the_doc_pass_already_found_is_mirrored_too(tmp_path, monkeypatch):
+    """Bases were discovered by one `+search` with an empty query -- a single ranked slice,
+    which returned 11 of the 178 bitables the document pass has on disk. That pass asks 14
+    queries and records what each hit was, so the type is already written down; a title that
+    merely contains the word is not, which is why the field is matched and not the text."""
+    from lark_fs import sync as sync_module
+
+    listed: list[str] = []
+
+    async def fake_run(*argv, **_):
+        listed.append(argv[argv.index("--base-token") + 1])
+        return {"tables": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))  # the empty query finds nothing this time
+    store = Store(tmp_path)
+    store.write_yaml("docs/from_search/meta.yaml", {"token": "from_search", "doc_types": "BITABLE"})
+    store.write_yaml("docs/from_wiki/meta.yaml", {"token": "from_wiki", "obj_type": "bitable"})
+    store.write_yaml("docs/just_talks_about_it/meta.yaml", {"token": "just_talks_about_it", "doc_types": "DOCX", "title": "how to use a bitable"})
+
+    run(sync_module.sync_bases(store, Progress()))
+    assert sorted(listed) == ["from_search", "from_wiki"], f"the doc corpus is the record of what a bitable is: {listed}"

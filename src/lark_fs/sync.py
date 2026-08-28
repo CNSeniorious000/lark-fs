@@ -13,7 +13,7 @@ from contextlib import aclosing
 from datetime import UTC, datetime, timedelta, timezone
 from itertools import islice
 from pathlib import Path
-from re import compile
+from re import MULTILINE, compile
 from typing import Any
 
 from reactivity import reactive
@@ -61,6 +61,7 @@ def _months_between(start: datetime, end: datetime) -> int:
     return (end.year - start.year) * 12 + end.month - start.month + 1
 
 
+RE_BITABLE = compile(r"^(?:doc_types: BITABLE|obj_type: bitable)$", MULTILINE)  # a doc meta names its own type; a title that merely says "bitable" is not one
 RE_TENANT = compile(r"https://[a-z0-9-]+\.(?:feishu\.cn|larksuite\.com)")
 
 
@@ -105,6 +106,7 @@ PROFILE_HOURS = 168.0  # one per 19 users, and a name or a department moves far 
 MEETING_SETTLE_DAYS = 7
 COMMENT_HOURS = 24.0  # for a document that has comments; the empty ones are 87% of the corpus and wait a week
 COMMENT_EMPTY_HOURS = 168.0
+BASE_HOURS = 24.0  # one `+table-list` per base, 178 of them
 RECHECK_FRESH_SECONDS = (
     3600.0  # how recently written counts as "just synced", for the half of the recheck that is not a sweep  # a minute appears only once the recording is processed, well after the meeting ends
 )
@@ -1119,12 +1121,26 @@ async def sync_bases(store: Store, p: Progress):
     except cli.LarkError:
         pass
 
-    p.set("bases", total=len(tokens))
+    # One empty query is one ranked slice: it found 11 of the 178 bitables the document
+    # pass already has on disk, which asks 14 queries and writes down what each hit was.
+    # The type is a plain scalar, so it is matched in the text rather than parsed -- 0.6s
+    # across 3049 files against 3.6s, for an answer that was identical on every one.
+    tokens |= {f.parent.name for f in (store.root / "docs").glob("*/meta.yaml") if RE_BITABLE.search(f.read_text())}
+
+    # Listing a base is a request per base, so 178 of them is a whole sync's worth on every
+    # run. Nothing about a bitable says when it last changed, so it is a clock like the rest.
+    stale = not swept_recently(store, "bases", BASE_HOURS)
+    todo = [t for t in tokens if stale or not (store.root / f"bases/{t}").exists()]
+    p.set("bases", total=len(todo), note=f"{len(tokens)} bases")
+
+    whole_pass = True
 
     async def one(app_token: str):
+        nonlocal whole_pass
         try:
             tables = await cli.run("base", "+table-list", "--base-token", app_token, "--limit", "100")
         except cli.LarkError:
+            whole_pass = False
             return
         for t in (tables or {}).get("tables") or []:
             tid = t.get("id")
@@ -1151,8 +1167,11 @@ async def sync_bases(store: Store, p: Progress):
                 store.write_yaml(rel, _clean(rows))
         p.bump("bases")
 
-    await cli.spread(one, tokens)
-    p.set("bases", state="done")
+    await cli.spread(one, todo)
+    # a pass that failed halfway must not claim its day, for the reason the doc search gives
+    if stale and todo and whole_pass:
+        record_sweep(store, "bases")
+    p.set("bases", state="done", note=f"{len(tokens)} bases")
 
 
 async def sync_wiki(store: Store, p: Progress):
