@@ -1270,3 +1270,34 @@ def test_reindex_notices_a_file_it_cannot_read_anywhere_in_the_store(tmp_path):
 
     store.write_yaml("docs/tok_1/comments.yaml", {"items": [{"text": "   \n邀请你进项目了"}]})
     assert reindex(tmp_path)["damaged"] == 0, "a file the current serializer wrote was called damaged"
+
+
+def test_comments_are_asked_for_even_when_the_body_has_settled(tmp_path, monkeypatch):
+    """The comments fetch sat inside the body pass, which only runs for a document whose
+    body is stale. So one transient failure there was permanent: the body settled, the pass
+    stopped visiting, and the comments were never asked for again. 258 documents on the real
+    store -- 8% of the corpus -- had a body and no record of ever having been asked."""
+    from lark_fs import sync as sync_module
+
+    calls: list[str] = []
+
+    async def fake_run(*argv, **_):
+        calls.append(argv[1])
+        if argv[1] == "+fetch":
+            return {"document": {"content": "body"}}
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("wiki/s1/nodes.yaml", [{"node_token": "n1", "obj_token": "tok1", "obj_type": "docx", "title": "settled"}])
+    store.write("docs/tok1/content.md", "body")  # already fetched, and nothing says it moved
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+
+    assert "+list-comments" in calls, f"a document whose body had settled was never asked for comments: {calls}"
+    assert "+fetch" not in calls, f"the body was re-fetched to reach the comments beside it: {calls}"
+    assert store.exists("docs/tok1/comments.yaml"), "an empty answer left no record, so the next run cannot tell it from never having asked"
+
+    calls.clear()
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert calls == [], f"a document with both records was visited again: {calls}"

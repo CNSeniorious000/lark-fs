@@ -704,30 +704,31 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # bodies are the expensive part: fetch one only if we have none, or if the server's
     # update_time moved past the copy we already wrote. A doc can be edited at any time,
     # so there is no window to bound this -- the timestamp is the only reliable signal.
-    todo = [t for t, meta in seen.items() if _doc_is_stale(store, t, meta)]
+    todo = [t for t, meta in seen.items() if _doc_is_stale(store, t, meta) or _doc_wants_comments(store, t)]
     p.set("docs", done=0, total=len(todo), note=f"{len(seen)} docs")
 
     async def body(token: str):
         title = cli.oneline(seen[token].get("title") or token, 48)
-        unsupported = False
-        try:
-            data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {title}")
-        except cli.LarkError as e:
-            if not e.is_unsupported_type:
-                return  # transient: leave it due, the next run retries it
-            data, unsupported = None, True  # only docx exports markdown -- but a sheet still carries comments, so keep going
-        finally:
-            p.bump("docs", last=title)  # count attempts, not successes, or the fraction never reaches its end
-        content = ((data or {}).get("document") or {}).get("content")
-        if content:
-            store.write(f"docs/{token}/content.md", content)
-        else:
-            # An empty body now is not an empty body forever: a docx written later has
-            # content where it had none, and a bare marker outlasts it. Only "unsupported"
-            # is a permanent verdict; the marker records which of the two this was, and its
-            # own mtime is what an empty one is re-checked against.
-            store.write(f"docs/{token}/.nobody", "unsupported" if unsupported else "")
-        if store.exists(f"docs/{token}/.nocomments"):
+        if _doc_is_stale(store, token, seen[token]):
+            unsupported = False
+            try:
+                data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {title}")
+            except cli.LarkError as e:
+                if not e.is_unsupported_type:
+                    return  # transient: leave it due, the next run retries it
+                data, unsupported = None, True  # only docx exports markdown -- but a sheet still carries comments, so keep going
+            finally:
+                p.bump("docs", last=title)  # count attempts, not successes, or the fraction never reaches its end
+            content = ((data or {}).get("document") or {}).get("content")
+            if content:
+                store.write(f"docs/{token}/content.md", content)
+            else:
+                # An empty body now is not an empty body forever: a docx written later has
+                # content where it had none, and a bare marker outlasts it. Only "unsupported"
+                # is a permanent verdict; the marker records which of the two this was, and its
+                # own mtime is what an empty one is re-checked against.
+                store.write(f"docs/{token}/.nobody", "unsupported" if unsupported else "")
+        if not _doc_wants_comments(store, token):
             return
         try:
             # asking as `docx` is what Drive recognises the token *as*, and anything that is
@@ -735,13 +736,17 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             # 220 sheets and bitables from the wiki, and 203 more from search, lost their
             # comments that way, to a mistake of our own.
             comments = await cli.run("drive", "+list-comments", "--token", token, "--type", _doc_type(seen[token]), "--solved-status", "all")
-            if comments:
-                store.write_yaml(f"docs/{token}/comments.yaml", comments)
         except cli.LarkError as e:
             # a token Drive does not recognise never will; anything else may just be a
             # rate limit, and marking that would lose the comments for good
             if e.is_missing:
                 store.write(f"docs/{token}/.nocomments", "")
+            return
+        # The answer is the record, empty or not. Writing only a non-empty one left the
+        # document indistinguishable from one never asked, and the retry was gated on the
+        # *body* being stale -- so 258 documents whose bodies had settled were never going
+        # to be asked again.
+        store.write_yaml(f"docs/{token}/comments.yaml", comments)
 
     await cli.spread(body, todo)
     p.set("docs", state="done", note=f"{len(seen)} docs")
@@ -768,6 +773,17 @@ def _doc_type(meta: dict) -> str:
     """
     kind = str(meta.get("comment_type") or meta.get("obj_type") or meta.get("doc_types") or meta.get("file_type") or "").lower()
     return kind if kind in DOC_TYPES else "docx"
+
+
+def _doc_wants_comments(store: Store, token: str) -> bool:
+    """True when this document has no record of ever having been asked for comments.
+
+    The fetch used to sit inside the body pass, which only runs for a document whose body
+    is stale -- so one transient failure was permanent: the body settled, the pass stopped
+    visiting, and the comments were never asked for again. 258 documents on this store, 8%
+    of the corpus, had a body and no record at all.
+    """
+    return not (store.exists(f"docs/{token}/comments.yaml") or store.exists(f"docs/{token}/.nocomments"))
 
 
 def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
