@@ -506,7 +506,10 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
     async def one(chat_id: str):
         nonlocal reached
         try:
-            members = await cli.run("im", "+chat-members-list", "--chat-id", chat_id, "--page-all")
+            # `--page-all` is not all of them: lark-cli stops after ten pages unless told
+            # otherwise, and at the max page size that is a thousand. Four chats sat at
+            # exactly 1000 members with `has_more` still set -- the largest really has 3296.
+            members = await cli.run("im", "+chat-members-list", "--chat-id", chat_id, "--page-all", "--page-limit", "0")
         except cli.LarkError:
             p.bump("chats")  # p2p chats and ones we lack scope for simply have no roster
             return
@@ -1155,7 +1158,7 @@ async def sync_bases(store: Store, p: Progress):
 async def sync_wiki(store: Store, p: Progress):
     p.set("wiki", state="running")
     try:
-        spaces = await cli.run("wiki", "+space-list", "--page-all")
+        spaces = await cli.run("wiki", "+space-list", "--page-all", "--page-limit", "0")
     except cli.LarkError as e:
         p.set("wiki", state="error", note=str(e.payload)[:60])
         return
@@ -1168,7 +1171,9 @@ async def sync_wiki(store: Store, p: Progress):
         The distinction matters: a leaf and a rate-limited branch both have no nodes to
         return, and conflating them lets a failure look like an answer.
         """
-        argv = ["wiki", "+node-list", "--space-id", sid, "--page-all", *(["--parent-node-token", parent] if parent else [])]
+        # `--page-limit 0` for the reason given at the roster call: ten pages is the default
+        # ceiling, and no space or level is near it today, but a silent one is worth removing
+        argv = ["wiki", "+node-list", "--space-id", sid, "--page-all", "--page-limit", "0", *(["--parent-node-token", parent] if parent else [])]
         try:
             return ((await cli.run(*argv)) or {}).get("nodes") or []
         except cli.LarkError:

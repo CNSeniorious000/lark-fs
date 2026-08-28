@@ -1450,3 +1450,25 @@ def test_comments_are_asked_about_again_once_the_record_is_old(tmp_path):
 
     store.write("docs/quiet/.nocomments", "")
     assert not _doc_wants_comments(store, "quiet"), "a permanent verdict outranks any clock"
+
+
+def test_a_thousand_members_is_not_a_whole_roster(tmp_path, monkeypatch):
+    """`--page-all` reads as "every page" and is not: lark-cli's `--page-limit` defaults to
+    ten, and at the max page size that stops at a thousand. Four chats on this store sat at
+    exactly 1000 members with `has_more` still set; the largest of them has 3296."""
+    from lark_fs import sync as sync_module
+
+    argvs: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv, **_):
+        argvs.append(argv)
+        return {"users": [], "bots": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("chats/oc_1/meta.yaml", {"chat_id": "oc_1"})
+    run(sync_module.sync_chat_meta(store, Progress(), {"oc_1"}))
+
+    assert argvs, "no roster was asked for at all"
+    for argv in argvs:
+        assert "--page-all" in argv and argv[argv.index("--page-limit") + 1] == "0", f"the page cap is still in place: {argv}"
