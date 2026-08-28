@@ -1696,3 +1696,24 @@ def test_a_token_that_was_never_a_base_does_not_cost_the_whole_day(tmp_path, mon
 
     run(sync_module.sync_bases(store, Progress()))
     assert swept_recently(store, "bases", BASE_HOURS), "the day was claimed by a pass that answered everything it could"
+
+
+def test_the_document_counter_counts_documents(tmp_path, monkeypatch):
+    """`total` is every document that owes anything and the counter only bumped on a body
+    fetch, so a run whose work was comments read as "33 of 221" having done all 221. The
+    fraction is the only thing saying whether a pass is stuck."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*_argv, **_):
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    p = Progress()
+    for token in ("settled1000000000000000001", "settled1000000000000000002"):
+        store.write_yaml(f"docs/{token}/meta.yaml", {"token": token})
+        store.write(f"docs/{token}/content.md", "a body from an earlier run")  # only comments are owed
+
+    run(sync_module.sync_docs(store, p, search=False))
+    row = p.rows["docs"]
+    assert row["done"] == row["total"] == 2, f"two documents were visited and the row says {row['done']}/{row['total']}"

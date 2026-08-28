@@ -802,8 +802,6 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 if not (verdict := "unsupported" if e.is_unsupported_type else "forbidden" if e.is_forbidden else ""):
                     return  # transient: leave it due, the next run retries it
                 data = None
-            finally:
-                p.bump("docs", last=title)  # count attempts, not successes, or the fraction never reaches its end
             content = ((data or {}).get("document") or {}).get("content")
             if content:
                 store.write(f"docs/{token}/content.md", content)
@@ -840,7 +838,16 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         # to be asked again.
         store.write_yaml(f"docs/{token}/comments.yaml", {"count": len(comments), "items": comments})
 
-    await cli.spread(body, todo)
+    async def counted(token: str):
+        # once per document and whatever it owed, not once per fetch: `todo` holds documents
+        # that only owe comments too, and counting only fetches left the fraction short of
+        # its own total -- 33 of 221 on a run where every one of the 221 was visited
+        try:
+            await body(token)
+        finally:
+            p.bump("docs", last=cli.oneline(seen[token].get("title") or token, 48))
+
+    await cli.spread(counted, todo)
     _flush_doc_links(store, found)
     p.set("docs", state="done", note=f"{len(seen)} docs")
 
