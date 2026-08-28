@@ -1139,9 +1139,44 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: boo
             store.write_yaml(f"meetings/{m['meeting_id']}/detail.yaml", _clean(m))
 
     await cli.spread(details, [todo[i : i + 20] for i in range(0, len(todo), 20)])
+    await _resolve_notes(store, p)
     if full:
         record_sweep(store, "meetings")
     p.set("meetings", state="done", note=f"{len(ids)} meetings")
+
+
+RE_NOTE_ID = compile(r"^note_id: '?(\d+)'?$", MULTILINE)
+
+
+async def _resolve_notes(store: Store, p: Progress):
+    """Turn the note a meeting kept into the documents it actually is.
+
+    `note_id` is reported by `+detail` and is not a drive token -- nothing can be fetched
+    with it. `note +detail` translates it into two or three that can be: the note itself,
+    the verbatim transcript, and whatever was shared into the meeting. None of the 131 notes
+    on this store had any of its documents mirrored, because no search ever ranked them.
+
+    Asked once per note: the mapping is a fact about a meeting that already happened, so the
+    answer on disk is the reason not to ask again.
+    """
+    seen = {m[1] for d in ("meetings", "minutes") for f in (store.root / d).glob("*/detail.yaml") for m in RE_NOTE_ID.finditer(f.read_text())}
+    todo = sorted(n for n in seen if not store.exists(f"notes/{n}.yaml"))
+    if not todo:
+        return
+    p.set("meetings", note=f"resolving {len(todo)} meeting notes")
+    links: list[tuple[str, str]] = []
+
+    async def one(note_id: str):
+        try:
+            data = await cli.run("note", "+detail", "--note-id", note_id)
+        except cli.LarkError:
+            return  # transient: leave it unresolved, the next run asks again
+        note = (data or {}).get("note") or {}
+        store.write_yaml(f"notes/{note_id}.yaml", _clean(note))
+        links.extend((t, "docx") for t in (note.get("note_doc_token"), note.get("verbatim_doc_token"), *(note.get("shared_doc_tokens") or [])) if t)
+
+    await cli.spread(one, todo)
+    _flush_doc_links(store, links)
 
 
 def _meeting_detail_is_due(store: Store, mid: str) -> bool:

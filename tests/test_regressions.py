@@ -1544,3 +1544,30 @@ def test_a_minute_its_meeting_names_is_fetched_even_if_search_missed_it(tmp_path
 
     run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
     assert asked == ["obcnMinuteToken000001"], f"the meeting was the only record that this minute exists: {asked}"
+
+
+def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
+    """`note_id` is not a drive token: it is reported by `vc +detail` and nothing can be
+    fetched with it. `note +detail` translates it into the tokens that can be -- the note,
+    the verbatim transcript, and whatever was shared in. None of the 131 notes on this store
+    had a single one of its documents mirrored. Asked once: the mapping is a fact about a
+    meeting that already happened."""
+    from lark_fs.sync import _resolve_notes
+
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        asked.append(argv[argv.index("--note-id") + 1])
+        return {"note": {"note_id": "7608565672679836877", "note_doc_token": "NoteDocToken00000000001", "verbatim_doc_token": "VerbatimToken0000000001", "shared_doc_tokens": ["SharedDocToken000000001"]}}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("meetings/m1/detail.yaml", {"meeting_id": "m1", "note_id": "7608565672679836877"})
+
+    run(_resolve_notes(store, Progress()))
+    assert asked == ["7608565672679836877"]
+    for token in ("NoteDocToken00000000001", "VerbatimToken0000000001", "SharedDocToken000000001"):
+        assert store.exists(f"docs/{token}/meta.yaml"), f"{token} is a document, and only the note said so"
+
+    run(_resolve_notes(store, Progress()))
+    assert len(asked) == 1, f"the answer is on disk; asking again buys nothing: {asked}"
