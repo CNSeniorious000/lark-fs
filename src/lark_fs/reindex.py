@@ -10,7 +10,7 @@ from pathlib import Path
 from yaml import YAMLError, safe_load
 
 from .store import Store
-from .sync import _flush_doc_links, _flush_media, _index_doc_links, _index_media, _record_sender, migrate_threads
+from .sync import _doc_links, _flush_doc_links, _flush_media, _index_media, _record_sender, migrate_threads
 
 
 def reindex(root: Path) -> dict[str, int]:
@@ -36,11 +36,14 @@ def reindex(root: Path) -> dict[str, int]:
             continue
         scanned += 1
         media += _index_media(msg)
-        links += _index_doc_links(msg)
+        links += _doc_links(str(msg.get("content") or ""))
         _record_sender(store, msg, known)
 
     _flush_media(store, media)
-    _flush_doc_links(store, links)  # the backlog: a link only reaches the doc pass once some run has read the message carrying it
+    # the backlog: a link only reaches the doc pass once something has read the text carrying
+    # it, and the doc pass reads a body once and then leaves it alone for as long as it is current
+    links += [link for f in (root / "docs").glob("*/content.md") for link in _doc_links(f.read_text())]
+    _flush_doc_links(store, links)
     # this scan takes minutes; a full save would write back the snapshot it loaded at the
     # start, undoing every cursor a sync advanced while it ran
     store.save_cursor("messages_unreadable")

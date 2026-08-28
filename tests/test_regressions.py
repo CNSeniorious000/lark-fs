@@ -1507,17 +1507,17 @@ def test_a_document_only_ever_linked_in_a_chat_is_still_mirrored(tmp_path):
     A `/wiki/` link carries a node token: measured on five, every one answers 1069307 as
     `docx` and answers as `wiki`. One the node lists resolve is a document the mirror
     already has under its own token, and must not be stored a second time under this one."""
-    from lark_fs.sync import _flush_doc_links, _index_doc_links
+    from lark_fs.sync import _doc_links, _flush_doc_links
 
     store = Store(tmp_path)
     store.write_yaml("wiki/s1/nodes.yaml", [{"node_token": "nodeknown0000000000000", "obj_token": "obj1000000000000000000", "obj_type": "docx"}])
     store.write_yaml("docs/obj1000000000000000000/meta.yaml", {"token": "obj1000000000000000000"})
-    msg = {"content": "see https://x.feishu.cn/docx/PLAINDOCXTOKEN0000000001 and https://x.feishu.cn/base/BITABLETOKEN00000000001 and https://x.feishu.cn/wiki/nodeknown0000000000000 and https://x.feishu.cn/wiki/nodeorphan000000000000"}
+    text = "see https://x.feishu.cn/docx/PLAINDOCXTOKEN0000000001 and https://x.feishu.cn/base/BITABLETOKEN00000000001 and https://x.feishu.cn/wiki/nodeknown0000000000000 and https://x.feishu.cn/wiki/nodeorphan000000000000 and https://x.feishu.cn/file/EMBEDDEDATTACHMENT000001"
 
-    links = _index_doc_links(msg)
-    _flush_doc_links(store, links)
+    _flush_doc_links(store, _doc_links(text))
 
     assert store.read_yaml("docs/PLAINDOCXTOKEN0000000001/meta.yaml")["doc_types"] == "DOCX"
     assert store.read_yaml("docs/BITABLETOKEN00000000001/meta.yaml")["doc_types"] == "BITABLE", "the URL says what it is, and nothing else does"
     assert store.read_yaml("docs/nodeorphan000000000000/meta.yaml")["comment_type"] == "wiki", "a node token is only addressable as a wiki node"
     assert not store.exists("docs/nodeknown0000000000000/meta.yaml"), "this is `obj1000000000000000000` under another name; mirroring both stores it twice"
+    assert not store.exists("docs/EMBEDDEDATTACHMENT000001/meta.yaml"), "a Drive file exports no markdown, and document bodies link 13203 of them"

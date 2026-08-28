@@ -197,7 +197,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
                     written = [msg]
                 for one_msg in written:  # a thread arrives as one item but is many messages
                     media.extend(_index_media(one_msg))
-                    links.extend(_index_doc_links(one_msg))
+                    links.extend(_doc_links(str(one_msg.get("content") or "")))
                     _record_sender(store, one_msg, users)
                 total += len(written)
                 newest = max(newest, created)
@@ -265,7 +265,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         if replies := await repair_thread(store, *item):
             for r in replies:
                 media.extend(_index_media(r))
-                links.extend(_index_doc_links(r))
+                links.extend(_doc_links(str(r.get("content") or "")))
                 _record_sender(store, r, users)
             cut.pop(item[0], None)
         p.set("messages", note=f"{total} messages, {len(cut)} truncated threads left")
@@ -283,7 +283,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
             return  # the request failed, not the messages: they stay queued for the next run
         for msg in fetched:
             media.extend(_index_media(msg))
-            links.extend(_index_doc_links(msg))
+            links.extend(_doc_links(str(msg.get("content") or "")))
             _record_sender(store, msg, users)
         for mid, _ in chunk:
             broken.pop(mid, None)  # asked for and not returned: recalled, and not coming back either
@@ -344,24 +344,27 @@ def _flush_media(store: Store, rows: list[dict]):
         store.write_yaml(rel, sorted(merged.values(), key=lambda r: r["create_time"]))
 
 
-# What a Lark URL calls a document, and what `+list-comments` calls the same thing.
-LINK_TYPES = {"docx": "docx", "docs": "doc", "sheets": "sheet", "base": "bitable", "file": "file", "slides": "slides", "wiki": "wiki"}
+# What a Lark URL calls a document, and what `+list-comments` calls the same thing. `/file/`
+# is deliberately absent: it is a Drive file, which exports no markdown -- and document
+# bodies link 13203 of them, mostly their own embedded attachments, against 495 real
+# documents. A stub each would be a fetch and a comments call apiece for a title.
+LINK_TYPES = {"docx": "docx", "docs": "doc", "sheets": "sheet", "base": "bitable", "slides": "slides", "wiki": "wiki"}
 RE_DOC_LINK = compile(r"(?:feishu\.cn|larksuite\.com)/(" + "|".join(LINK_TYPES) + r")/([A-Za-z0-9]{20,30})")
 
 
-def _index_doc_links(msg: dict) -> list[tuple[str, str]]:
-    """Documents named by a link in a message, as (token, type).
+def _doc_links(text: str) -> list[tuple[str, str]]:
+    """Documents named by a link in this text, as (token, type).
 
     A search returns a ranked slice and the wiki walk only covers the wiki, so between them
-    they miss what people actually pass around: of the 900 documents linked in these chats
-    417 had never been mirrored, 14% again on top of the 3049 that had. Reading the link
-    costs nothing -- the message is already in hand -- and its path segment is the type,
-    which is the one thing `+list-comments` cannot be asked without.
+    they miss what people actually pass around and what documents point at: 417 of the 900
+    linked in these chats had never been mirrored, and another 495 are linked from document
+    bodies. Reading the link costs nothing -- the text is already in hand -- and its path
+    segment is the type, which is the one thing `+list-comments` cannot be asked without.
 
     A `/wiki/` link is a node token, not the document's own: measured on five of them, every
     one answers 1069307 as `docx` and answers as `wiki`.
     """
-    return [(token, LINK_TYPES[kind]) for kind, token in RE_DOC_LINK.findall(str(msg.get("content") or ""))]
+    return [(token, LINK_TYPES[kind]) for kind, token in RE_DOC_LINK.findall(text)]
 
 
 def _flush_doc_links(store: Store, links: list[tuple[str, str]]):
@@ -698,6 +701,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     p.set("docs", state="running")
     seen: dict[str, dict] = {}
     alias = _wiki_aliases(store)
+    found: list[tuple[str, str]] = []  # documents linked from the bodies this run fetched
     probed = search and not queries  # a custom query set sweeps a different corpus; it is not the scheduled pass
     # Sequential on purpose, and it is the one pass that does not fan out. Walking the 14
     # queries end to end runs at ~1.15 req/s, which is under whatever sustained budget the
@@ -785,6 +789,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             content = ((data or {}).get("document") or {}).get("content")
             if content:
                 store.write(f"docs/{token}/content.md", content)
+                found.extend(_doc_links(content))  # documents point at documents, and 495 of those were nowhere else
             else:
                 # An empty body now is not an empty body forever: a docx written later has
                 # content where it had none, and a bare marker outlasts it. Only "unsupported"
@@ -816,6 +821,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         store.write_yaml(f"docs/{token}/comments.yaml", {"count": len(comments), "items": comments})
 
     await cli.spread(body, todo)
+    _flush_doc_links(store, found)
     p.set("docs", state="done", note=f"{len(seen)} docs")
 
 
