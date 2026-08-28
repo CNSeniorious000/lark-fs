@@ -1836,7 +1836,7 @@ def test_an_error_written_to_stderr_is_still_an_error_with_a_code(monkeypatch):
     assert caught.value.is_missing
 
 
-def test_an_attachment_the_cli_cannot_deliver_is_not_retried_every_run(tmp_path):
+def test_an_attachment_the_cli_cannot_deliver_is_not_retried_every_run(tmp_path, monkeypatch):
     """15 of the 15587 attachments indexed here fail the same way twice in a row -- lark-cli's
     ranged download mis-frames the response ("delivered more than the 705 bytes its framing
     declared") or the server answers HTTP 400. Nothing was written for them, so every sync
@@ -1844,18 +1844,29 @@ def test_an_attachment_the_cli_cannot_deliver_is_not_retried_every_run(tmp_path)
 
     The fault is the client's, not the tenant's, so a `lark-cli update` can fix it: the
     marker is a clock, like every other "not today" answer in this mirror."""
-    from lark_fs.attachments import UNDELIVERABLE, UNDELIVERABLE_HOURS, Policy, _dir, _pending
+    from lark_fs.attachments import UNDELIVERABLE, UNDELIVERABLE_HOURS, Policy, _dir, _pending, sync_attachments
 
+    tries = 0
+
+    async def fake_run(*argv, **_):
+        nonlocal tries
+        tries += 1
+        raise cli.LarkError(list(argv), {"error": {"type": "network", "message": "range response delivered more than the 705 bytes its framing declared"}})
+
+    monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
-    row = {"key": "file_1", "name": "trace.json", "chat_id": "oc_1", "message_id": "om_1"}
+    row = {"key": "file_1", "name": "trace.json", "chat_id": "oc_1", "message_id": "om_1", "create_time": "2026-08-01 00:00"}
+    store.write_yaml("chats/oc_1/media.yaml", [row])
     policy = Policy({"text"}, 10 * 1024 * 1024)
     assert _pending(store, policy, [row]) == [row], "nothing on disk yet, so it is worth a request"
 
-    dest = _dir(store, row)
-    dest.mkdir(parents=True, exist_ok=True)
-    (dest / UNDELIVERABLE).write_text("range response delivered more than the 705 bytes its framing declared")
-    assert _pending(store, policy, [row]) == [], "the same failure is not worth 15 requests a sync"
+    # the directory does not exist until the download writes into it, and it never got there
+    run(sync_attachments(store, Progress()))
+    run(sync_attachments(store, Progress()))
+    assert tries == 1, "the same failure is not worth 15 requests a sync"
 
+    dest = _dir(store, row)
     mark = dest / UNDELIVERABLE
+    assert mark.is_file()
     utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - UNDELIVERABLE_HOURS * 3600 - 60))
     assert _pending(store, policy, [row]) == [row], "but the client can be updated, so it comes back"

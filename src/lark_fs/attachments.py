@@ -163,6 +163,10 @@ async def sync_attachments(store: Store, p: Progress):
             data = await cli.run(*argv, cwd=str(store.root), subject=f"fetch {cli.oneline(name or key, 40)}")
         except cli.LarkError as e:
             if e.is_undeliverable:
+                # nothing has created the directory yet: the CLI does that as it writes, and
+                # it never got that far. `write_text` rather than `store.write`, which skips
+                # an unchanged file -- and an unrefreshed mtime is a clock stuck at one week
+                dest.mkdir(parents=True, exist_ok=True)
                 (dest / UNDELIVERABLE).write_text(str(e.payload)[:200])
             return  # anything else is transient: leave it due, the next run retries it
         finally:
