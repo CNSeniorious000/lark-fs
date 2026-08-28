@@ -333,7 +333,10 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None, subject: str
                             await shield(proc.wait())
                     raise
                 failed = False
-                payload = _parse(out.decode(errors="replace"))
+                # some errors are written to stderr with nothing on stdout at all -- a
+                # deleted document is one -- and reading only stdout turned a structured
+                # answer into an opaque blob whose code had to be found again with a regex
+                payload = _parse(out.decode(errors="replace")) or _parse(stderr.decode(errors="replace"))
                 outcome = "" if subject else (_summarise(payload) if feed_enabled else "")
             finally:
                 if feed_enabled:

@@ -1809,3 +1809,28 @@ def test_a_deleted_page_is_not_fetched_forever(tmp_path, monkeypatch):
 
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert len(fetched) == 1, f"deleted does not come back: {fetched}"
+
+
+def test_an_error_written_to_stderr_is_still_an_error_with_a_code(monkeypatch):
+    """`docs +fetch` writes its error envelope to stderr and leaves stdout empty for a
+    deleted page. Reading only stdout left nothing to parse, so the whole response became
+    one opaque string whose code had to be recovered by regex from its first 400 bytes --
+    which works, but only as long as the code appears early enough in whatever was printed.
+    The envelope is the same JSON wherever it is written."""
+    from asyncio import sleep
+
+    class FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            await sleep(0)
+            return b"", b'{"ok": false, "error": {"type": "api", "code": 3380003, "message": "Document page has been deleted"}}'
+
+    async def fake_exec(*_a, **_k):
+        return FakeProc()
+
+    monkeypatch.setattr(cli, "create_subprocess_exec", fake_exec)
+    with pytest.raises(cli.LarkError) as caught:
+        run(cli.run("docs", "+fetch", "--doc", "gone"))
+    assert caught.value.payload["error"]["code"] == 3380003, "the structured answer was there all along"
+    assert caught.value.is_missing
