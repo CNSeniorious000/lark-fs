@@ -1717,3 +1717,36 @@ def test_the_document_counter_counts_documents(tmp_path, monkeypatch):
     run(sync_module.sync_docs(store, p, search=False))
     row = p.rows["docs"]
     assert row["done"] == row["total"] == 2, f"two documents were visited and the row says {row['done']}/{row['total']}"
+
+
+def test_a_wiki_link_that_is_not_a_node_settles_after_one_retry(tmp_path, monkeypatch):
+    """A `/wiki/` URL carries the node token for some documents and the document's own for
+    others, and nothing in the link says which. Guessing `wiki` gets 131005 for the second
+    kind -- "real, but not that" -- which is neither missing nor forbidden, so nothing was
+    written and 162 documents were asked again on every run, forever. One retry settles it;
+    writing the answer into the meta is what keeps it to one."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+fetch":
+            return {"document": {"content": "body"}}
+        asked.append(kind := argv[argv.index("--type") + 1])
+        if kind == "wiki":
+            raise cli.LarkError(list(argv), {"error": {"code": 131005, "message": "not found"}})
+        return {"items": [{"comment_id": "1"}]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/notreallyanode000000001/meta.yaml", {"token": "notreallyanode000000001", "doc_types": "WIKI", "comment_type": "wiki"})
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert asked == ["wiki", "docx"], f"the guess was wrong and the retry is what finds out: {asked}"
+    assert store.read_yaml("docs/notreallyanode000000001/comments.yaml")["count"] == 1
+
+    asked.clear()
+    store.write("docs/notreallyanode000000001/.nobody", "")  # force it due again
+    (tmp_path / "docs/notreallyanode000000001/comments.yaml").unlink()
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert asked == ["docx"], f"the meta now says what it is, so the wrong guess is not made twice: {asked}"

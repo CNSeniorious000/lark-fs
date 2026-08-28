@@ -814,24 +814,36 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 store.write(f"docs/{token}/.nobody", verdict)
         if not _doc_wants_comments(store, token):
             return
-        try:
-            # asking as `docx` is what Drive recognises the token *as*, and anything that is
-            # not one answers 1069307 -- an error we then remember as "has no comments".
-            # 220 sheets and bitables from the wiki, and 203 more from search, lost their
-            # comments that way, to a mistake of our own.
-            # A single call stops at one page, and nine documents sat at exactly 50 with
-            # `has_more` set -- the busiest ones, which are the ones worth having. Asking
-            # for the second page of the first of them returned 33 more.
-            comments = [c async for c in cli.paginate("drive", "+list-comments", "--token", token, "--type", _doc_type(seen[token]), "--solved-status", "all", key="items")]
-        except cli.LarkError as e:
-            # a token Drive does not recognise never will, and neither does a kind the
-            # endpoint cannot name; anything else may just be a rate limit, and marking
-            # that would lose the comments for good
-            if e.is_missing or e.is_unlistable_type:
-                store.write(f"docs/{token}/.nocomments", "")
-            elif e.is_forbidden:
-                store.write(f"docs/{token}/.nocomments", "forbidden")
-            return
+        # asking as `docx` is what Drive recognises the token *as*, and anything that is not
+        # one answers 1069307 -- an error we then remember as "has no comments". 220 sheets
+        # and bitables from the wiki, and 203 more from search, lost their comments that way,
+        # to a mistake of our own. A single call also stops at one page, and nine documents
+        # sat at exactly 50 with `has_more` set -- the busiest ones, which are the ones worth
+        # having; asking the first of them for its second page returned 33 more comments.
+        kind = _doc_type(seen[token])
+        for retried in (False, True):
+            try:
+                comments = [c async for c in cli.paginate("drive", "+list-comments", "--token", token, "--type", kind, "--solved-status", "all", key="items")]
+                break
+            except cli.LarkError as e:
+                # 131005 is Drive saying this token is real and is not a wiki node, so the
+                # `/wiki/` link that named it carried the document's own token rather than
+                # its node's. Nothing in the link says which, and 162 documents stalled on
+                # it -- retried every run, recorded never. One retry settles it, and writing
+                # the answer into the meta is what keeps it to one.
+                if not retried and kind == "wiki" and e.is_wrong_kind:
+                    kind = "docx"
+                    seen[token]["comment_type"] = kind
+                    store.write_yaml(f"docs/{token}/meta.yaml", {**store.read_yaml(f"docs/{token}/meta.yaml"), "comment_type": kind})
+                    continue
+                # a token Drive does not recognise never will, and neither does a kind the
+                # endpoint cannot name; anything else may just be a rate limit, and marking
+                # that would lose the comments for good
+                if e.is_missing or e.is_unlistable_type:
+                    store.write(f"docs/{token}/.nocomments", "")
+                elif e.is_forbidden:
+                    store.write(f"docs/{token}/.nocomments", "forbidden")
+                return
         # The answer is the record, empty or not. Writing only a non-empty one left the
         # document indistinguishable from one never asked, and the retry was gated on the
         # *body* being stale -- so 258 documents whose bodies had settled were never going

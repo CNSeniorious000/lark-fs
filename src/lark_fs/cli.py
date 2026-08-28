@@ -255,6 +255,16 @@ class LarkError(Exception):
         return "comments list only supports" in str(self.payload)
 
     @property
+    def is_wrong_kind(self):
+        """131005: the token is real and is not the kind it was asked for.
+
+        A `/wiki/` URL carries a node token for some documents and the document's own for
+        others, and nothing in the link says which. Unlike 1069307 -- which means the same
+        thing *and* "no such token" -- this one is safe to retry with another type.
+        """
+        return self._code == 131005
+
+    @property
     def is_forbidden(self):
         """The account can see that this exists and cannot read it.
 
