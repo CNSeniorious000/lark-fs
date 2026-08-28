@@ -253,6 +253,16 @@ class LarkError(Exception):
         return "comments list only supports" in str(self.payload)
 
     @property
+    def is_forbidden(self):
+        """The account can see that this exists and cannot read it.
+
+        `minutes +detail` says so per token rather than as a code, and offers to ask the
+        owner -- which this will not do on anyone's behalf. 189 of the 710 minutes the
+        meetings name are in this state, and they were 189 requests every sync.
+        """
+        return "No read permission" in str(self.payload)
+
+    @property
     def is_quota_exhausted(self):
         """99991403: the tenant's *monthly* API allowance is gone.
 

@@ -1592,3 +1592,36 @@ def test_a_search_window_does_not_pay_for_a_rejection_first(tmp_path, monkeypatc
     store = Store(tmp_path)
     run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
     assert sizes and all(int(n) <= 30 for n in sizes), f"a page size the endpoint refuses is a wasted request per window: {sizes}"
+
+
+def test_a_minute_nobody_shared_is_not_fetched_forever(tmp_path, monkeypatch):
+    """189 of the 710 minutes the meetings name answer "No read permission" -- per token,
+    in the body, not as an error code. Nothing on disk recorded that, so every sync asked
+    for all 189 again. Access can be granted later, so it is a clock and not a verdict:
+    `+apply-permission` exists, and asking the owner on their behalf is not this tool's
+    call to make."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+    payload = {"minutes": [{"minute_token": "obcnDenied0000000000", "error": "No read permission for minute obcnDenied0000000000. Ask the user before running: minutes +apply-permission ..."}]}
+
+    async def fake_run(*argv, **_):
+        asked.append(argv[argv.index("--minute-tokens") + 1])
+        raise cli.LarkError(list(argv), {"ok": False, "data": payload})
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))
+    store = Store(tmp_path)
+    store.write_yaml("meetings/m1/detail.yaml", {"meeting_id": "m1", "minute_token": "obcnDenied0000000000"})
+
+    run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
+    assert asked == ["obcnDenied0000000000"]
+    assert store.exists("minutes/obcnDenied0000000000/.noaccess")
+
+    run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
+    assert len(asked) == 1, f"a refusal on disk is the reason not to ask again this week: {asked}"
+
+    mark = tmp_path / "minutes/obcnDenied0000000000/.noaccess"
+    utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - sync_module.NOACCESS_HOURS * 3600 - 60))
+    run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
+    assert len(asked) == 2, "but permission can be granted, so the marker is a clock"

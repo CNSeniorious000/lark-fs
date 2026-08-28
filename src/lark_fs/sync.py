@@ -112,6 +112,7 @@ SEARCH_PAGE = 30
 COMMENT_HOURS = 24.0  # for a document that has comments; the empty ones are 87% of the corpus and wait a week
 COMMENT_EMPTY_HOURS = 168.0
 BASE_HOURS = 24.0  # one `+table-list` per base, 178 of them
+NOACCESS_HOURS = 168.0  # how long a minute nobody shared with us is left alone before asking again
 RECHECK_FRESH_SECONDS = (
     3600.0  # how recently written counts as "just synced", for the half of the recheck that is not a sweep  # a minute appears only once the recording is processed, well after the meeting ends
 )
@@ -1022,6 +1023,19 @@ async def _sweep_window(lo: datetime, hi: datetime, cap: int, take: Callable[[da
     await _sweep_window(mid, hi, cap, take)
 
 
+def _minute_is_due(store: Store, token: str) -> bool:
+    """True when the transcript is missing and it is worth asking for again.
+
+    189 of the 710 minutes the meetings name answer "No read permission", and nothing on
+    disk said so -- they were fetched again on every sync, forever. Access can be granted
+    later, so the marker is a clock rather than a verdict, the way an empty `.nobody` is.
+    """
+    if store.exists(f"minutes/{token}/transcript.txt"):
+        return False
+    mark = store.root / f"minutes/{token}/.noaccess"
+    return not mark.exists() or datetime.now(UTC).timestamp() - mark.stat().st_mtime > NOACCESS_HOURS * 3600
+
+
 async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool = True):
     """Minutes (妙记): metadata, AI summary, chapters, todos, and full transcript.
 
@@ -1065,7 +1079,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
     # 710 minute tokens in meetings/*/detail.yaml had nothing under minutes/ at all. The
     # token is all `+detail` needs, so nothing is written for one until it answers.
     known = {*found} | {m[1] for f in (store.root / "meetings").glob("*/detail.yaml") for m in RE_MINUTE_TOKEN.finditer(f.read_text())}
-    todo = [t for t in sorted(known) if not store.exists(f"minutes/{t}/transcript.txt")]
+    todo = [t for t in sorted(known) if _minute_is_due(store, t)]
     p.set("minutes", done=0, total=len(todo), note=f"fetching transcripts · {len(known)} minutes")
 
     async def detail(token: str):
@@ -1073,7 +1087,9 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
         try:
             # +detail writes transcript.txt into <cwd>/minutes/<token>/ itself -- run it in the store so it lands in place
             data = await cli.run("minutes", "+detail", "--minute-tokens", token, "--transcript", "--summary", "--todo", "--chapter", "--keyword", cwd=str(store.root))
-        except cli.LarkError:
+        except cli.LarkError as e:
+            if e.is_forbidden:
+                store.write(f"minutes/{token}/.noaccess", "")  # not permanent -- access can be granted, so the marker's mtime is when to look again
             return
         finally:
             p.bump("minutes", last=cli.summarise_title((found.get(token) or {}).get("display_info")))
