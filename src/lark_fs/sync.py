@@ -826,6 +826,8 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             # that would lose the comments for good
             if e.is_missing or e.is_unlistable_type:
                 store.write(f"docs/{token}/.nocomments", "")
+            elif e.is_forbidden:
+                store.write(f"docs/{token}/.nocomments", "forbidden")
             return
         # The answer is the record, empty or not. Writing only a non-empty one left the
         # document indistinguishable from one never asked, and the retry was gated on the
@@ -875,8 +877,11 @@ def _doc_wants_comments(store: Store, token: str) -> bool:
     way `.nobody`'s is. Reading it costs a parse, which is why the cheap stat runs first --
     the answer for all but a handful of documents on any given run is no.
     """
-    if store.exists(f"docs/{token}/.nocomments"):
-        return False
+    if (never := store.root / f"docs/{token}/.nocomments").exists():
+        # empty is a verdict -- Drive does not know this token, or cannot name its kind.
+        # "forbidden" is only today's answer, so it is re-asked on the same clock a locked
+        # body is: without one, a document nobody shared was a request on every single run.
+        return never.read_text() == "forbidden" and datetime.now(UTC).timestamp() - never.stat().st_mtime > NOACCESS_HOURS * 3600
     record = store.root / f"docs/{token}/comments.yaml"
     if not record.exists():
         return True

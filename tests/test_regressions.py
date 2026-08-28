@@ -1640,7 +1640,7 @@ def test_a_document_nobody_shared_is_not_re_fetched_every_sync(tmp_path, monkeyp
         if argv[1] == "+fetch":
             fetched.append(argv[argv.index("--doc") + 1])
             raise cli.LarkError(list(argv), {"error": {"code": 3380004, "message": "No permission to operate on this document"}})
-        return {"items": []}
+        raise cli.LarkError(list(argv), {"error": {"code": 131006, "message": "user lacks permission for the requested resource"}})
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -1649,11 +1649,13 @@ def test_a_document_nobody_shared_is_not_re_fetched_every_sync(tmp_path, monkeyp
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert fetched == ["locked"]
     assert (tmp_path / "docs/locked/.nobody").read_text() == "forbidden"
+    assert (tmp_path / "docs/locked/.nocomments").read_text() == "forbidden", "131006 for its comments is the same answer, and was retried just as often"
 
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert len(fetched) == 1, f"a refusal on disk is the reason not to ask again this week: {fetched}"
 
-    mark = tmp_path / "docs/locked/.nobody"
-    utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - sync_module.NOACCESS_HOURS * 3600 - 60))
+    for name in (".nobody", ".nocomments"):
+        mark = tmp_path / f"docs/locked/{name}"
+        utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - sync_module.NOACCESS_HOURS * 3600 - 60))
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert len(fetched) == 2, "but it can be shared later, so the marker is a clock"
