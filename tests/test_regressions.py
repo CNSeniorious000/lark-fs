@@ -1571,3 +1571,24 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
 
     run(_resolve_notes(store, Progress()))
     assert len(asked) == 1, f"the answer is on disk; asking again buys nothing: {asked}"
+
+
+def test_a_search_window_does_not_pay_for_a_rejection_first(tmp_path, monkeypatch):
+    """`paginate` defaults to 50 per page and both search endpoints reject anything over 30
+    outright -- with the cap in the message, which is why the walk still worked: it read the
+    number off the error and asked again. Every window cost one request to learn a constant.
+    `drive +search` is the other shape and clamps to 20 silently, so it costs nothing."""
+    from lark_fs import sync as sync_module
+
+    sizes: list[str] = []
+
+    async def fake_run(*argv, **_):
+        sizes.append(argv[argv.index("--page-size") + 1])
+        if int(sizes[-1]) > 30:
+            raise cli.LarkError(list(argv), {"error": {"message": "invalid --page-size 50: must be between 1 and 30"}})
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
+    assert sizes and all(int(n) <= 30 for n in sizes), f"a page size the endpoint refuses is a wasted request per window: {sizes}"

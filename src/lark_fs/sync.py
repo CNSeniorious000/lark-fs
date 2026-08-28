@@ -105,6 +105,10 @@ SEARCH_HOURS = 6.0
 ROSTER_HOURS = 24.0  # one request per chat, 200 on this store
 PROFILE_HOURS = 168.0  # one per 19 users, and a name or a department moves far more slowly than a roster
 MEETING_SETTLE_DAYS = 7
+# Both search endpoints reject anything above 30 outright, and `paginate`'s default is 50:
+# every window paid for a rejection before retrying at the cap the error named. `drive
+# +search` is the other shape -- it clamps silently to 20 and answers, so it costs nothing.
+SEARCH_PAGE = 30
 COMMENT_HOURS = 24.0  # for a document that has comments; the empty ones are 87% of the corpus and wait a week
 COMMENT_EMPTY_HOURS = 168.0
 BASE_HOURS = 24.0  # one `+table-list` per base, 178 of them
@@ -1034,7 +1038,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
     async def take(lo: datetime, hi: datetime) -> int:
         seen = 0
         try:
-            async for item in cli.paginate("minutes", "+search", "--start", lo.strftime("%Y-%m-%d"), "--end", hi.strftime("%Y-%m-%d"), key="items"):
+            async for item in cli.paginate("minutes", "+search", "--start", lo.strftime("%Y-%m-%d"), "--end", hi.strftime("%Y-%m-%d"), key="items", page_size=SEARCH_PAGE):
                 seen += 1
                 if token := item.get("token"):
                     found[token] = item
@@ -1104,7 +1108,7 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: boo
     async def take(lo: datetime, hi: datetime) -> int:
         seen = 0
         try:
-            async for item in cli.paginate("vc", "+search", "--start", lo.strftime("%Y-%m-%d"), "--end", hi.strftime("%Y-%m-%d"), key="items"):
+            async for item in cli.paginate("vc", "+search", "--start", lo.strftime("%Y-%m-%d"), "--end", hi.strftime("%Y-%m-%d"), key="items", page_size=SEARCH_PAGE):
                 seen += 1
                 if mid := item.get("id"):
                     ids.add(mid)
