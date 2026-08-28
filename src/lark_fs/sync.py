@@ -112,7 +112,7 @@ SEARCH_PAGE = 30
 COMMENT_HOURS = 24.0  # for a document that has comments; the empty ones are 87% of the corpus and wait a week
 COMMENT_EMPTY_HOURS = 168.0
 BASE_HOURS = 24.0  # one `+table-list` per base, 178 of them
-NOACCESS_HOURS = 168.0  # how long a minute nobody shared with us is left alone before asking again
+NOACCESS_HOURS = 168.0  # how long anything nobody shared with us is left alone before asking again
 RECHECK_FRESH_SECONDS = (
     3600.0  # how recently written counts as "just synced", for the half of the recheck that is not a sweep  # a minute appears only once the recording is processed, well after the meeting ends
 )
@@ -1260,7 +1260,7 @@ async def sync_bases(store: Store, p: Progress):
     # Listing a base is a request per base, so 178 of them is a whole sync's worth on every
     # run. Nothing about a bitable says when it last changed, so it is a clock like the rest.
     stale = not swept_recently(store, "bases", BASE_HOURS)
-    todo = [t for t in tokens if stale or not (store.root / f"bases/{t}").exists()]
+    todo = [t for t in tokens if stale or not store.exists(f"bases/{t}")]
     p.set("bases", total=len(todo), note=f"{len(tokens)} bases")
 
     whole_pass = True
