@@ -678,7 +678,11 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 title = _clean(r.get("title_highlighted"))
                 _note_tenant(meta.get("url", ""))
                 seen[token] = {**meta, "token": token, "title": title, **({"comment_type": kind} if kind else {})}
-                store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "token": token, "entity_type": r.get("entity_type"), "title": title})
+                # `kind` has to survive to disk: 260 documents are addressable only as `wiki`,
+                # and a later run that meets one through the directory instead of a search hit
+                # would re-derive `docx` from `doc_types`, get 1069307, and file it as having no
+                # comments -- the first one tried this way had four.
+                store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "token": token, "entity_type": r.get("entity_type"), "title": title, **({"comment_type": kind} if kind else {})})
                 p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:
             probed = False  # cut short: the rest of this query's pages are gone, so the corpus on disk is partial

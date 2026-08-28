@@ -1326,3 +1326,31 @@ def test_a_document_this_run_did_not_rediscover_is_still_finished(tmp_path, monk
 
     assert "tok_forgotten" in asked, f"a document the mirror already had was left unfinished: {asked}"
     assert store.exists("docs/tok_forgotten/comments.yaml")
+
+
+def test_a_wiki_only_document_is_still_addressable_after_the_search_that_found_it(tmp_path, monkeypatch):
+    """`comment_type` is decided at discovery, from the alias table -- a WIKI hit whose node
+    token no node list resolves is addressable only as `wiki`, and that is not derivable
+    from the record afterwards. It was kept in memory and never written down, so the run
+    that met the document again through the directory instead of a search hit re-derived
+    `docx` from `doc_types`, got 1069307, and filed it as having no comments. 260 documents
+    in the mirror are in that group; the first one tried this way had four comments."""
+    from lark_fs import sync as sync_module
+
+    asked: list[tuple[str, str]] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+fetch":
+            return {"document": {"content": "body"}}
+        asked.append((argv[argv.index("--token") + 1], argv[argv.index("--type") + 1]))
+        raise cli.LarkError(list(argv), {"error": {"code": 99991400}})  # transient: leaves no record behind
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"entity_type": "WIKI", "title_highlighted": "stranded", "result_meta": {"token": "node_orphan", "doc_types": "DOCX", "url": ""}}]))
+    store = Store(tmp_path)
+    run(sync_module.sync_docs(store, Progress(), queries=["q"]))
+    assert asked == [("node_orphan", "wiki")], f"discovery itself must address it as a wiki node: {asked}"
+
+    asked.clear()
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert asked == [("node_orphan", "wiki")], f"the next run only has the directory to go on, and must reach the same document: {asked}"
