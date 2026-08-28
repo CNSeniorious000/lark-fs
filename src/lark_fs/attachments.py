@@ -6,6 +6,7 @@ kind whitelist is what actually bounds the request count.
 """
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 from tomllib import loads
 from typing import TYPE_CHECKING
@@ -22,6 +23,8 @@ makefile markdown md mjs ndjson patch php pl properties py r rb rs rst scss sh s
 tsx txt vtt xml yaml yml zsh"""
 
 OVERSIZE = ".oversize"  # marks a key that was fetched, measured, and discarded
+UNDELIVERABLE = ".undeliverable"  # marks a key lark-cli cannot bring across, with when that was last true
+UNDELIVERABLE_HOURS = 168.0  # the fault is the client's, so an update can fix it -- a clock, not a verdict
 
 KINDS: dict[str, set[str]] = {
     "text": set(_TEXT.split()),
@@ -131,6 +134,8 @@ def _settled(d: Path, cap: int) -> bool:
         return False
     if (mark := d / OVERSIZE).is_file():
         return int(mark.read_text() or 0) > cap
+    if (mark := d / UNDELIVERABLE).is_file():
+        return datetime.now(UTC).timestamp() - mark.stat().st_mtime < UNDELIVERABLE_HOURS * 3600
     return True
 
 
@@ -156,8 +161,10 @@ async def sync_attachments(store: Store, p: Progress):
         argv = ["im", "+messages-resources-download", "--message-id", row["message_id"], "--file-key", key, "--type", "image" if key.startswith("img_") else "file", "--output", str(out)]
         try:
             data = await cli.run(*argv, cwd=str(store.root), subject=f"fetch {cli.oneline(name or key, 40)}")
-        except cli.LarkError:
-            return  # transient: leave it due, the next run retries it
+        except cli.LarkError as e:
+            if e.is_undeliverable:
+                (dest / UNDELIVERABLE).write_text(str(e.payload)[:200])
+            return  # anything else is transient: leave it due, the next run retries it
         finally:
             p.bump("files", last=cli.oneline(name or key, 48))
         kept += _settle(dest, data or {}, policy.max_bytes)

@@ -256,6 +256,20 @@ class LarkError(Exception):
         return "comments list only supports" in str(self.payload)
 
     @property
+    def is_undeliverable(self):
+        """lark-cli could not bring the bytes across, and will not next time either.
+
+        Its ranged download mis-frames the response for some attachments -- "range response
+        delivered more than the N bytes its framing declared", reproducible on the same file
+        twice -- and a handful answer HTTP 400 outright. 15 of the 15587 attachments on this
+        store are in that state, and they were 15 downloads on every single sync.
+
+        Not the tenant's answer but the client's, so a `lark-cli update` may well fix it:
+        remembered as a clock rather than a verdict.
+        """
+        return "its framing declared" in str(self.payload) or "HTTP 400" in str(self.payload)
+
+    @property
     def is_wrong_kind(self):
         """131005: the token is real and is not the kind it was asked for.
 

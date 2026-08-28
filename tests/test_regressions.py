@@ -1834,3 +1834,28 @@ def test_an_error_written_to_stderr_is_still_an_error_with_a_code(monkeypatch):
         run(cli.run("docs", "+fetch", "--doc", "gone"))
     assert caught.value.payload["error"]["code"] == 3380003, "the structured answer was there all along"
     assert caught.value.is_missing
+
+
+def test_an_attachment_the_cli_cannot_deliver_is_not_retried_every_run(tmp_path):
+    """15 of the 15587 attachments indexed here fail the same way twice in a row -- lark-cli's
+    ranged download mis-frames the response ("delivered more than the 705 bytes its framing
+    declared") or the server answers HTTP 400. Nothing was written for them, so every sync
+    reported "0 kept of 15 tried" and spent 15 requests learning it again.
+
+    The fault is the client's, not the tenant's, so a `lark-cli update` can fix it: the
+    marker is a clock, like every other "not today" answer in this mirror."""
+    from lark_fs.attachments import UNDELIVERABLE, UNDELIVERABLE_HOURS, Policy, _dir, _pending
+
+    store = Store(tmp_path)
+    row = {"key": "file_1", "name": "trace.json", "chat_id": "oc_1", "message_id": "om_1"}
+    policy = Policy({"text"}, 10 * 1024 * 1024)
+    assert _pending(store, policy, [row]) == [row], "nothing on disk yet, so it is worth a request"
+
+    dest = _dir(store, row)
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / UNDELIVERABLE).write_text("range response delivered more than the 705 bytes its framing declared")
+    assert _pending(store, policy, [row]) == [], "the same failure is not worth 15 requests a sync"
+
+    mark = dest / UNDELIVERABLE
+    utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - UNDELIVERABLE_HOURS * 3600 - 60))
+    assert _pending(store, policy, [row]) == [row], "but the client can be updated, so it comes back"
