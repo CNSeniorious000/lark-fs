@@ -749,7 +749,10 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             # not one answers 1069307 -- an error we then remember as "has no comments".
             # 220 sheets and bitables from the wiki, and 203 more from search, lost their
             # comments that way, to a mistake of our own.
-            comments = await cli.run("drive", "+list-comments", "--token", token, "--type", _doc_type(seen[token]), "--solved-status", "all")
+            # A single call stops at one page, and nine documents sat at exactly 50 with
+            # `has_more` set -- the busiest ones, which are the ones worth having. Asking
+            # for the second page of the first of them returned 33 more.
+            comments = [c async for c in cli.paginate("drive", "+list-comments", "--token", token, "--type", _doc_type(seen[token]), "--solved-status", "all", key="items")]
         except cli.LarkError as e:
             # a token Drive does not recognise never will, and neither does a kind the
             # endpoint cannot name; anything else may just be a rate limit, and marking
@@ -761,7 +764,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         # document indistinguishable from one never asked, and the retry was gated on the
         # *body* being stale -- so 258 documents whose bodies had settled were never going
         # to be asked again.
-        store.write_yaml(f"docs/{token}/comments.yaml", comments)
+        store.write_yaml(f"docs/{token}/comments.yaml", {"count": len(comments), "items": comments})
 
     await cli.spread(body, todo)
     p.set("docs", state="done", note=f"{len(seen)} docs")

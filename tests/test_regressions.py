@@ -569,11 +569,15 @@ def test_an_unresolved_wiki_hit_is_addressed_as_a_wiki_node(tmp_path, monkeypatc
 
     asked: list[tuple[str, str]] = []
 
-    async def fake_run(*argv, **_):
-        if argv[1] == "+fetch":
-            return {"document": {"content": "body"}}
+    async def fake_run(*_argv, **_):
+        return {"document": {"content": "body"}}
+
+    async def fake_paginate(*argv, **_k):
+        if argv[1] == "+search":
+            for hit in hits:
+                yield hit
+            return
         asked.append((argv[argv.index("--token") + 1], argv[argv.index("--type") + 1]))
-        return {"items": []}
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -583,7 +587,7 @@ def test_an_unresolved_wiki_hit_is_addressed_as_a_wiki_node(tmp_path, monkeypatc
         {"entity_type": "WIKI", "title_highlighted": "resolved", "result_meta": {"token": "node_known", "doc_types": "DOCX", "url": ""}},
         {"entity_type": "WIKI", "title_highlighted": "stranded", "result_meta": {"token": "node_orphan", "doc_types": "DOCX", "url": ""}},
     ]
-    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter(hits))
+    monkeypatch.setattr(cli, "paginate", fake_paginate)
 
     run(sync_module.sync_docs(store, Progress(), queries=["q"]))
 
@@ -1316,8 +1320,14 @@ def test_a_document_this_run_did_not_rediscover_is_still_finished(tmp_path, monk
         asked.append(argv[argv.index("--token") + 1] if "--token" in argv else argv[1])
         return {"items": []}
 
+    async def fake_paginate(*argv, **_k):  # this run's search returns nothing
+        if argv[1] == "+list-comments":
+            asked.append(argv[argv.index("--token") + 1])
+        for item in ():
+            yield item
+
     monkeypatch.setattr(cli, "run", fake_run)
-    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))  # this run's search returns nothing
+    monkeypatch.setattr(cli, "paginate", fake_paginate)
     store = Store(tmp_path)
     store.write_yaml("docs/tok_forgotten/meta.yaml", {"token": "tok_forgotten", "doc_types": "DOCX"})
     store.write("docs/tok_forgotten/content.md", "a body from an earlier run")
@@ -1339,14 +1349,18 @@ def test_a_wiki_only_document_is_still_addressable_after_the_search_that_found_i
 
     asked: list[tuple[str, str]] = []
 
-    async def fake_run(*argv, **_):
-        if argv[1] == "+fetch":
-            return {"document": {"content": "body"}}
+    async def fake_run(*_argv, **_):
+        return {"document": {"content": "body"}}
+
+    async def fake_paginate(*argv, **_k):
+        if argv[1] == "+search":
+            yield {"entity_type": "WIKI", "title_highlighted": "stranded", "result_meta": {"token": "node_orphan", "doc_types": "DOCX", "url": ""}}
+            return
         asked.append((argv[argv.index("--token") + 1], argv[argv.index("--type") + 1]))
         raise cli.LarkError(list(argv), {"error": {"code": 99991400}})  # transient: leaves no record behind
 
     monkeypatch.setattr(cli, "run", fake_run)
-    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"entity_type": "WIKI", "title_highlighted": "stranded", "result_meta": {"token": "node_orphan", "doc_types": "DOCX", "url": ""}}]))
+    monkeypatch.setattr(cli, "paginate", fake_paginate)
     store = Store(tmp_path)
     run(sync_module.sync_docs(store, Progress(), queries=["q"]))
     assert asked == [("node_orphan", "wiki")], f"discovery itself must address it as a wiki node: {asked}"
@@ -1382,3 +1396,27 @@ def test_a_kind_the_comments_endpoint_cannot_name_is_not_asked_again(tmp_path, m
 
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert calls == 1, f"and it must not be asked a second time: {calls} calls"
+
+
+def test_a_document_with_more_comments_than_one_page_keeps_all_of_them(tmp_path, monkeypatch):
+    """`+list-comments` was a single call, so it stopped at whatever one page holds. Nine
+    documents in the mirror sat at exactly 50 items with `has_more` set -- the busiest ones,
+    which are the ones worth having. Asking the first of them for its second page returned
+    33 more comments that had never been written down."""
+    from lark_fs import sync as sync_module
+
+    pages = {None: ([{"comment_id": str(i)} for i in range(50)], "p2"), "p2": ([{"comment_id": str(i)} for i in range(50, 83)], None)}
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+fetch":
+            return {"document": {"content": "body"}}
+        items, nxt = pages[argv[argv.index("--page-token") + 1] if "--page-token" in argv else None]
+        return {"items": items, "has_more": nxt is not None, "page_token": nxt or ""}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/busy/meta.yaml", {"token": "busy", "doc_types": "DOCX"})
+    store.write("docs/busy/content.md", "a body from an earlier run")
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert len(store.read_yaml("docs/busy/comments.yaml")["items"]) == 83, "the second page was dropped"
