@@ -797,9 +797,10 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             try:
                 data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {title}")
             except cli.LarkError as e:
-                # only docx exports markdown, and a document nobody shared exports nothing at
-                # all -- but either can still carry comments, so both keep going
-                if not (verdict := "unsupported" if e.is_unsupported_type else "forbidden" if e.is_forbidden else ""):
+                # only docx exports markdown, a deleted page exports nothing ever again, and
+                # a document nobody shared exports nothing today -- all three can still carry
+                # comments, so all three keep going
+                if not (verdict := "unsupported" if e.is_unsupported_type else "deleted" if e.is_missing else "forbidden" if e.is_forbidden else ""):
                     return  # transient: leave it due, the next run retries it
                 data = None
             content = ((data or {}).get("document") or {}).get("content")
@@ -919,11 +920,11 @@ def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
     """True when the body is missing, or the server copy is newer than ours.
 
     A `.nobody` marker stands in for the body it does not have, and its content says which
-    kind of nothing: "unsupported" is permanent -- only docx exports markdown and that will
-    not change -- "forbidden" is a document nobody shared, which they still might, so it is
-    a clock; and an empty one only means the document was empty when we last looked, with
-    its mtime as when that was. Treating them alike froze an empty docx out of every later
-    run, and re-fetched an unreadable one on every single sync.
+    kind of nothing: "unsupported" and "deleted" are permanent -- only docx exports markdown,
+    and a deleted page is gone -- "forbidden" is a document nobody shared, which they still
+    might, so it is a clock; and an empty one only means the document was empty when we last
+    looked, with its mtime as when that was. Treating them alike froze an empty docx out of
+    every later run, and re-fetched an unreachable one on every single sync.
     """
     remote = meta.get("update_time")
     body = store.root / f"docs/{token}/content.md"
@@ -932,7 +933,7 @@ def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
     mark = store.root / f"docs/{token}/.nobody"
     if not mark.exists():
         return True
-    if (verdict := mark.read_text()) == "unsupported":
+    if (verdict := mark.read_text()) in ("unsupported", "deleted"):
         return False
     if verdict == "forbidden":
         return datetime.now(UTC).timestamp() - mark.stat().st_mtime > NOACCESS_HOURS * 3600

@@ -227,11 +227,12 @@ class LarkError(Exception):
         """This endpoint will never have anything for that token.
 
         Permanent, unlike a rate limit -- worth remembering, so the same request is not
-        reissued on every run. Drive says 1069307 for a token it does not have and 1069304
-        for a document that has been deleted; Base says 91402, and 800004006 for a token
-        that was never a base to begin with, which the document corpus hands it a couple of.
+        reissued on every run. Drive says 1069307 for a token it does not have, and 1069304
+        (comments) or 3380003 (body) for a document that has been deleted; Base says 91402,
+        and 800004006 for a token that was never a base to begin with, which the document
+        corpus hands it a couple of.
         """
-        return self._code in (1069307, 1069304, 91402, 800004006)
+        return self._code in (1069307, 1069304, 3380003, 91402, 800004006)
 
     @property
     def is_unsupported_type(self):

@@ -1782,3 +1782,30 @@ def test_every_answer_drive_gives_about_a_comment_list_is_recorded(tmp_path, mon
     asked.clear()
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert asked == [], f"both answers are on disk now: {asked}"
+
+
+def test_a_deleted_page_is_not_fetched_forever(tmp_path, monkeypatch):
+    """`docs +fetch` answers 3380003 for a page that has been deleted, and that was neither
+    "unsupported" nor "forbidden", so nothing was written and the fetch returned before the
+    comments half ever ran -- nine documents owed both and never settled. The page is gone
+    for good, unlike a document that has merely not been shared yet."""
+    from lark_fs import sync as sync_module
+
+    fetched: list[str] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+fetch":
+            fetched.append(argv[argv.index("--doc") + 1])
+            raise cli.LarkError(list(argv), {"error": {"code": 3380003, "message": "Document page has been deleted"}})
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/gone1000000000000000001/meta.yaml", {"token": "gone1000000000000000001", "doc_types": "DOCX"})
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert (tmp_path / "docs/gone1000000000000000001/.nobody").read_text() == "deleted"
+    assert store.exists("docs/gone1000000000000000001/comments.yaml"), "a deleted page can still have comments, so the fetch must not end the visit"
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert len(fetched) == 1, f"deleted does not come back: {fetched}"
