@@ -61,6 +61,7 @@ def _months_between(start: datetime, end: datetime) -> int:
     return (end.year - start.year) * 12 + end.month - start.month + 1
 
 
+RE_MINUTE_TOKEN = compile(r"^minute_token: '?([A-Za-z0-9]+)'?$", MULTILINE)
 RE_BITABLE = compile(r"^(?:doc_types: BITABLE|obj_type: bitable)$", MULTILINE)  # a doc meta names its own type; a title that merely says "bitable" is not one
 RE_TENANT = compile(r"https://[a-z0-9-]+\.(?:feishu\.cn|larksuite\.com)")
 
@@ -1056,8 +1057,12 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
     for token, item in found.items():
         store.write_yaml(f"minutes/{token}/meta.yaml", _clean(item))
 
-    todo = [t for t in found if not store.exists(f"minutes/{t}/transcript.txt")]
-    p.set("minutes", done=0, total=len(todo), note=f"fetching transcripts · {len(found)} minutes")
+    # A recorded meeting names its minute, and `+search` did not always rank it: 191 of the
+    # 710 minute tokens in meetings/*/detail.yaml had nothing under minutes/ at all. The
+    # token is all `+detail` needs, so nothing is written for one until it answers.
+    known = {*found} | {m[1] for f in (store.root / "meetings").glob("*/detail.yaml") for m in RE_MINUTE_TOKEN.finditer(f.read_text())}
+    todo = [t for t in sorted(known) if not store.exists(f"minutes/{t}/transcript.txt")]
+    p.set("minutes", done=0, total=len(todo), note=f"fetching transcripts · {len(known)} minutes")
 
     async def detail(token: str):
         Aborted.check()
@@ -1081,7 +1086,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
     await cli.spread(detail, todo)
     if full:
         record_sweep(store, "minutes")
-    p.set("minutes", state="done", note=f"{len(found)} minutes")
+    p.set("minutes", state="done", note=f"{len(known)} minutes")
 
 
 async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: bool = True):

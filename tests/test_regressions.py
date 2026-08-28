@@ -1521,3 +1521,26 @@ def test_a_document_only_ever_linked_in_a_chat_is_still_mirrored(tmp_path):
     assert store.read_yaml("docs/nodeorphan000000000000/meta.yaml")["comment_type"] == "wiki", "a node token is only addressable as a wiki node"
     assert not store.exists("docs/nodeknown0000000000000/meta.yaml"), "this is `obj1000000000000000000` under another name; mirroring both stores it twice"
     assert not store.exists("docs/EMBEDDEDATTACHMENT000001/meta.yaml"), "a Drive file exports no markdown, and document bodies link 13203 of them"
+
+
+def test_a_minute_its_meeting_names_is_fetched_even_if_search_missed_it(tmp_path, monkeypatch):
+    """`+search` caps at 50 per query, which is why minutes are walked month by month -- but
+    a window at its ceiling still hides whatever ranked below it. A recorded meeting names
+    its minute in `detail.yaml`, and 191 of the 710 tokens named there had nothing under
+    minutes/ at all. That token is everything `+detail` needs."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        asked.append(argv[argv.index("--minute-tokens") + 1])
+        return {"minutes": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))  # the search ranks nothing this run
+    store = Store(tmp_path)
+    store.write_yaml("meetings/m1/detail.yaml", {"meeting_id": "m1", "minute_token": "obcnMinuteToken000001"})
+    store.write_yaml("meetings/m2/detail.yaml", {"meeting_id": "m2"})  # never recorded, so nothing to fetch
+
+    run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
+    assert asked == ["obcnMinuteToken000001"], f"the meeting was the only record that this minute exists: {asked}"
