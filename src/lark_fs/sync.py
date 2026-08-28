@@ -701,6 +701,16 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             )
             p.bump("docs", last=cli.oneline(node.get("title")))
 
+    # A search is a ranked slice, so `seen` is what this run happened to be handed -- not
+    # what the mirror knows. A document discovered by an earlier run and not returned by
+    # this one was never visited again, whatever state it was left in: 15 sat with a body
+    # and no record of ever having been asked for comments, waiting for a slice that might
+    # never come back. The directory is the record of everything ever found, so anything
+    # there that still owes work is added to it.
+    for d in (store.root / "docs").iterdir():
+        if d.is_dir() and d.name not in seen and _doc_wants_comments(store, d.name):
+            seen[d.name] = store.read_yaml(f"docs/{d.name}/meta.yaml")
+
     # bodies are the expensive part: fetch one only if we have none, or if the server's
     # update_time moved past the copy we already wrote. A doc can be edited at any time,
     # so there is no window to bound this -- the timestamp is the only reliable signal.

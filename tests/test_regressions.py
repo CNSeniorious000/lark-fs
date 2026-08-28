@@ -1301,3 +1301,28 @@ def test_comments_are_asked_for_even_when_the_body_has_settled(tmp_path, monkeyp
     calls.clear()
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert calls == [], f"a document with both records was visited again: {calls}"
+
+
+def test_a_document_this_run_did_not_rediscover_is_still_finished(tmp_path, monkeypatch):
+    """A search is a ranked slice, so what a run is handed is not what the mirror knows. A
+    document found by an earlier run and not returned by this one was never visited again,
+    whatever state it had been left in -- 15 on the real store sat with a body and no record
+    of ever having been asked for comments, waiting for a slice that might never come."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        asked.append(argv[argv.index("--token") + 1] if "--token" in argv else argv[1])
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))  # this run's search returns nothing
+    store = Store(tmp_path)
+    store.write_yaml("docs/tok_forgotten/meta.yaml", {"token": "tok_forgotten", "doc_types": "DOCX"})
+    store.write("docs/tok_forgotten/content.md", "a body from an earlier run")
+
+    run(sync_module.sync_docs(store, Progress(), search=True))
+
+    assert "tok_forgotten" in asked, f"a document the mirror already had was left unfinished: {asked}"
+    assert store.exists("docs/tok_forgotten/comments.yaml")
