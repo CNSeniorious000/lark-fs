@@ -10,7 +10,7 @@ from pathlib import Path
 from yaml import YAMLError, safe_load
 
 from .store import Store
-from .sync import _flush_media, _index_media, _record_sender, migrate_threads
+from .sync import _flush_doc_links, _flush_media, _index_doc_links, _index_media, _record_sender, migrate_threads
 
 
 def reindex(root: Path) -> dict[str, int]:
@@ -18,6 +18,7 @@ def reindex(root: Path) -> dict[str, int]:
     split = migrate_threads(store)  # before the scan, so the messages it frees are indexed by it
     known: set[str] = set()
     media: list[dict] = []
+    links: list[tuple[str, str]] = []
     scanned = 0
     unreadable: list[Path] = []
 
@@ -35,13 +36,15 @@ def reindex(root: Path) -> dict[str, int]:
             continue
         scanned += 1
         media += _index_media(msg)
+        links += _index_doc_links(msg)
         _record_sender(store, msg, known)
 
     _flush_media(store, media)
+    _flush_doc_links(store, links)  # the backlog: a link only reaches the doc pass once some run has read the message carrying it
     # this scan takes minutes; a full save would write back the snapshot it loaded at the
     # start, undoing every cursor a sync advanced while it ran
     store.save_cursor("messages_unreadable")
-    return {"messages": scanned, "users": len(known), "media": len(media), "unreadable": len(unreadable), "threads_split": split, "damaged": len(_damaged(root))}
+    return {"messages": scanned, "users": len(known), "media": len(media), "doc_links": len(links), "unreadable": len(unreadable), "threads_split": split, "damaged": len(_damaged(root))}
 
 
 def _damaged(root: Path) -> list[Path]:

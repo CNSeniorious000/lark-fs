@@ -173,6 +173,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
     cursors: dict[str, str] = store.cursors.setdefault("chats", {})
     p.set("messages", state="running", total=len(known), done=0, note=f"{len(known)} chats")
     media: list[dict] = []
+    links: list[tuple[str, str]] = []
     users: set[str] = set()
     total = 0
 
@@ -196,6 +197,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
                     written = [msg]
                 for one_msg in written:  # a thread arrives as one item but is many messages
                     media.extend(_index_media(one_msg))
+                    links.extend(_index_doc_links(one_msg))
                     _record_sender(store, one_msg, users)
                 total += len(written)
                 newest = max(newest, created)
@@ -263,6 +265,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         if replies := await repair_thread(store, *item):
             for r in replies:
                 media.extend(_index_media(r))
+                links.extend(_index_doc_links(r))
                 _record_sender(store, r, users)
             cut.pop(item[0], None)
         p.set("messages", note=f"{total} messages, {len(cut)} truncated threads left")
@@ -280,6 +283,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
             return  # the request failed, not the messages: they stay queued for the next run
         for msg in fetched:
             media.extend(_index_media(msg))
+            links.extend(_index_doc_links(msg))
             _record_sender(store, msg, users)
         for mid, _ in chunk:
             broken.pop(mid, None)  # asked for and not returned: recalled, and not coming back either
@@ -293,6 +297,9 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         store.save_cursors()
 
     _flush_media(store, media)
+    # once for the whole run: the stubs are global, unlike the per-chat media index, and the
+    # alias table this reads is 2371 rows
+    _flush_doc_links(store, links)
     p.set("messages", state="done", note=f"{total} messages across {len(known)} chats")
     return known
 
@@ -335,6 +342,41 @@ def _flush_media(store: Store, rows: list[dict]):
         rel = f"chats/{chat_id}/media.yaml"
         merged = {r["key"]: r for r in store.read_yaml_rows(rel)} | {r["key"]: r for r in new}
         store.write_yaml(rel, sorted(merged.values(), key=lambda r: r["create_time"]))
+
+
+# What a Lark URL calls a document, and what `+list-comments` calls the same thing.
+LINK_TYPES = {"docx": "docx", "docs": "doc", "sheets": "sheet", "base": "bitable", "file": "file", "slides": "slides", "wiki": "wiki"}
+RE_DOC_LINK = compile(r"(?:feishu\.cn|larksuite\.com)/(" + "|".join(LINK_TYPES) + r")/([A-Za-z0-9]{20,30})")
+
+
+def _index_doc_links(msg: dict) -> list[tuple[str, str]]:
+    """Documents named by a link in a message, as (token, type).
+
+    A search returns a ranked slice and the wiki walk only covers the wiki, so between them
+    they miss what people actually pass around: of the 900 documents linked in these chats
+    417 had never been mirrored, 14% again on top of the 3049 that had. Reading the link
+    costs nothing -- the message is already in hand -- and its path segment is the type,
+    which is the one thing `+list-comments` cannot be asked without.
+
+    A `/wiki/` link is a node token, not the document's own: measured on five of them, every
+    one answers 1069307 as `docx` and answers as `wiki`.
+    """
+    return [(token, LINK_TYPES[kind]) for kind, token in RE_DOC_LINK.findall(str(msg.get("content") or ""))]
+
+
+def _flush_doc_links(store: Store, links: list[tuple[str, str]]):
+    """Write a stub for each linked document the mirror does not have.
+
+    Only the token and its type; the title, body and comments belong to the doc pass, which
+    picks this up the same way it picks up anything else already on disk. A wiki link the
+    node lists resolve is the same document under another name, and mirroring it under both
+    would store it twice -- so the alias table is read once here rather than per chat.
+    """
+    alias = _wiki_aliases(store) if any(kind == "wiki" for _, kind in links) else {}
+    for token, kind in links:
+        if store.exists(f"docs/{token}/meta.yaml") or (token in alias and store.exists(f"docs/{alias[token]}/meta.yaml")):
+            continue
+        store.write_yaml(f"docs/{token}/meta.yaml", {"token": token, "doc_types": kind.upper(), **({"comment_type": "wiki"} if kind == "wiki" else {})})
 
 
 def _thread_meta(root: dict, replies: list[dict]) -> dict:
