@@ -1870,3 +1870,24 @@ def test_an_attachment_the_cli_cannot_deliver_is_not_retried_every_run(tmp_path,
     assert mark.is_file()
     utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - UNDELIVERABLE_HOURS * 3600 - 60))
     assert _pending(store, policy, [row]) == [row], "but the client can be updated, so it comes back"
+
+
+def test_a_profiles_pass_that_resolves_nobody_still_claims_its_week(tmp_path, monkeypatch):
+    """The 89 ids left over here are deactivated accounts and bots: `+search-user` answers,
+    and answers with no rows, and always will. Claiming the week on `resolved` rather than
+    on "the endpoint answered" meant a pass made entirely of those never claimed it, so the
+    same five requests went out on every single run -- forever, by construction."""
+    from lark_fs import sync as sync_module
+    from lark_fs.sync import PROFILE_HOURS, swept_recently
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+get-user":
+            return {"user": {"tenant_key": "t1"}}
+        return {"users": []}  # answered, and nobody there resolves
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("users/ou_gone/meta.yaml", {"open_id": "ou_gone", "tenant_key": "t1", "name": "left the company"})
+
+    run(sync_module.sync_profiles(store, Progress()))
+    assert swept_recently(store, "profiles", PROFILE_HOURS), "the endpoint answered; there was simply nobody to find"

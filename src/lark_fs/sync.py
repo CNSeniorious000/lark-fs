@@ -625,13 +625,14 @@ async def sync_profiles(store: Store, p: Progress):
         p.set("profiles", state="done", note="up to date")
         return
 
-    resolved = 0
+    resolved, answered = 0, True
 
     async def one(batch: list[str]):
-        nonlocal resolved
+        nonlocal resolved, answered
         try:
             d = await cli.run("contact", "+search-user", "--user-ids", ",".join(batch), "--as", "user") or {}
         except cli.LarkError:
+            answered = False
             p.bump("profiles", len(batch))  # one batch that would not resolve is not the pass failing
             return
         rows = d.get("users") or []
@@ -643,10 +644,13 @@ async def sync_profiles(store: Store, p: Progress):
         p.bump("profiles", len(batch))
 
     await cli.spread(one, [todo[i : i + BATCH] for i in range(0, len(todo), BATCH)])
-    if stale and resolved:
+    # The clock is claimed by a pass that got answers, not by one that got rows: the 89 ids
+    # still outstanding here are deactivated accounts and bots, which resolve to nothing and
+    # always will. Gating on `resolved` meant a pass made entirely of those never claimed its
+    # week, so the same five requests went out on every single run. A rehired account now
+    # appears within the week rather than within the run, which is what the clock is for.
+    if stale and answered:
         record_sweep(store, "profiles")
-    # the shortfall is deactivated accounts and bots, which never resolve and so are asked
-    # for on every run -- cheap enough at one request per 19, and they come back if rehired
     p.set("profiles", state="done", note=f"{resolved}/{len(todo)} resolved")
 
 
