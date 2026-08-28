@@ -1625,3 +1625,35 @@ def test_a_minute_nobody_shared_is_not_fetched_forever(tmp_path, monkeypatch):
     utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - sync_module.NOACCESS_HOURS * 3600 - 60))
     run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
     assert len(asked) == 2, "but permission can be granted, so the marker is a clock"
+
+
+def test_a_document_nobody_shared_is_not_re_fetched_every_sync(tmp_path, monkeypatch):
+    """`docs +fetch` answers 3380004 for a document the account can see named but not read,
+    and nothing was written for it -- so it had no body, no marker, and came due again on
+    every single sync. It is not permanent the way "unsupported" is: someone can share it,
+    so the marker is a clock. Its comments are asked for either way."""
+    from lark_fs import sync as sync_module
+
+    fetched: list[str] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+fetch":
+            fetched.append(argv[argv.index("--doc") + 1])
+            raise cli.LarkError(list(argv), {"error": {"code": 3380004, "message": "No permission to operate on this document"}})
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/locked/meta.yaml", {"token": "locked", "doc_types": "DOCX"})
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert fetched == ["locked"]
+    assert (tmp_path / "docs/locked/.nobody").read_text() == "forbidden"
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert len(fetched) == 1, f"a refusal on disk is the reason not to ask again this week: {fetched}"
+
+    mark = tmp_path / "docs/locked/.nobody"
+    utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - sync_module.NOACCESS_HOURS * 3600 - 60))
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert len(fetched) == 2, "but it can be shared later, so the marker is a clock"

@@ -769,10 +769,15 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # this one was never visited again, whatever state it was left in: 15 sat with a body
     # and no record of ever having been asked for comments, waiting for a slice that might
     # never come back. The directory is the record of everything ever found, so anything
-    # there that still owes work is added to it.
+    # there that still owes work is added to it -- a body as well as comments, since a
+    # transient failure on either leaves the same nothing behind. Reading every meta to
+    # answer that is 3.2s over 3630 documents, against the 223 that turn out to owe
+    # anything; it is worth it, because the alternative is what the search happens to rank.
     for d in (store.root / "docs").glob("*"):
-        if d.is_dir() and d.name not in seen and _doc_wants_comments(store, d.name):
-            seen[d.name] = store.read_yaml(f"docs/{d.name}/meta.yaml")
+        if d.is_dir() and d.name not in seen:
+            meta = store.read_yaml(f"docs/{d.name}/meta.yaml")
+            if _doc_is_stale(store, d.name, meta) or _doc_wants_comments(store, d.name):
+                seen[d.name] = meta
 
     # bodies are the expensive part: fetch one only if we have none, or if the server's
     # update_time moved past the copy we already wrote. A doc can be edited at any time,
@@ -783,13 +788,15 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     async def body(token: str):
         title = cli.oneline(seen[token].get("title") or token, 48)
         if _doc_is_stale(store, token, seen[token]):
-            unsupported = False
+            verdict = ""
             try:
                 data = await cli.run("docs", "+fetch", "--doc", token, "--doc-format", "markdown", subject=f"fetch {title}")
             except cli.LarkError as e:
-                if not e.is_unsupported_type:
+                # only docx exports markdown, and a document nobody shared exports nothing at
+                # all -- but either can still carry comments, so both keep going
+                if not (verdict := "unsupported" if e.is_unsupported_type else "forbidden" if e.is_forbidden else ""):
                     return  # transient: leave it due, the next run retries it
-                data, unsupported = None, True  # only docx exports markdown -- but a sheet still carries comments, so keep going
+                data = None
             finally:
                 p.bump("docs", last=title)  # count attempts, not successes, or the fraction never reaches its end
             content = ((data or {}).get("document") or {}).get("content")
@@ -801,7 +808,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 # content where it had none, and a bare marker outlasts it. Only "unsupported"
                 # is a permanent verdict; the marker records which of the two this was, and its
                 # own mtime is what an empty one is re-checked against.
-                store.write(f"docs/{token}/.nobody", "unsupported" if unsupported else "")
+                store.write(f"docs/{token}/.nobody", verdict)
         if not _doc_wants_comments(store, token):
             return
         try:
@@ -882,10 +889,12 @@ def _doc_wants_comments(store: Store, token: str) -> bool:
 def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
     """True when the body is missing, or the server copy is newer than ours.
 
-    A `.nobody` marker stands in for the body it does not have, and is read the same way:
-    "unsupported" is permanent -- only docx exports markdown and that will not change --
-    while an empty one only means the document was empty when we last looked, and its mtime
-    is when that was. Treating the two alike froze an empty docx out of every later run.
+    A `.nobody` marker stands in for the body it does not have, and its content says which
+    kind of nothing: "unsupported" is permanent -- only docx exports markdown and that will
+    not change -- "forbidden" is a document nobody shared, which they still might, so it is
+    a clock; and an empty one only means the document was empty when we last looked, with
+    its mtime as when that was. Treating them alike froze an empty docx out of every later
+    run, and re-fetched an unreadable one on every single sync.
     """
     remote = meta.get("update_time")
     body = store.root / f"docs/{token}/content.md"
@@ -894,7 +903,11 @@ def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:
     mark = store.root / f"docs/{token}/.nobody"
     if not mark.exists():
         return True
-    return False if mark.read_text() == "unsupported" else bool(remote and remote > mark.stat().st_mtime)
+    if (verdict := mark.read_text()) == "unsupported":
+        return False
+    if verdict == "forbidden":
+        return datetime.now(UTC).timestamp() - mark.stat().st_mtime > NOACCESS_HOURS * 3600
+    return bool(remote and remote > mark.stat().st_mtime)
 
 
 def _edit_signal(msg: dict) -> tuple:
