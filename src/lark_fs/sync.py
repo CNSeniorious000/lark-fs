@@ -707,7 +707,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # and no record of ever having been asked for comments, waiting for a slice that might
     # never come back. The directory is the record of everything ever found, so anything
     # there that still owes work is added to it.
-    for d in (store.root / "docs").iterdir():
+    for d in (store.root / "docs").glob("*"):
         if d.is_dir() and d.name not in seen and _doc_wants_comments(store, d.name):
             seen[d.name] = store.read_yaml(f"docs/{d.name}/meta.yaml")
 
