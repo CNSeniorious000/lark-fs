@@ -130,7 +130,9 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
   3600+ pages if walked as a single sequence.
 - **docs / minutes / meetings** re-list metadata (cheap) but skip fetching bodies,
   transcripts and comments for entities already on disk. A doc's body is re-fetched when
-  the server's `update_time` passes the copy on disk.
+  the server's `update_time` passes the copy on disk. Comments have no such signal —
+  posting one does not touch `update_time` — so a document that has some is asked again
+  once a day, and one that has none once a week.
 - **discovery passes have no incremental signal to offer at all** — a wiki node carries no
   update time and a search returns a ranked slice with no cursor — so they run on a clock
   instead: the wiki tree once a day, the doc search probes every six hours, chat rosters

@@ -103,6 +103,8 @@ SEARCH_HOURS = 6.0
 ROSTER_HOURS = 24.0  # one request per chat, 200 on this store
 PROFILE_HOURS = 168.0  # one per 19 users, and a name or a department moves far more slowly than a roster
 MEETING_SETTLE_DAYS = 7
+COMMENT_HOURS = 24.0  # for a document that has comments; the empty ones are 87% of the corpus and wait a week
+COMMENT_EMPTY_HOURS = 168.0
 RECHECK_FRESH_SECONDS = (
     3600.0  # how recently written counts as "just synced", for the half of the recheck that is not a sweep  # a minute appears only once the recording is processed, well after the meeting ends
 )
@@ -794,14 +796,28 @@ def _doc_type(meta: dict) -> str:
 
 
 def _doc_wants_comments(store: Store, token: str) -> bool:
-    """True when this document has no record of ever having been asked for comments.
+    """True when this document's comments are missing, or old enough to ask about again.
 
     The fetch used to sit inside the body pass, which only runs for a document whose body
     is stale -- so one transient failure was permanent: the body settled, the pass stopped
     visiting, and the comments were never asked for again. 258 documents on this store, 8%
     of the corpus, had a body and no record at all.
+
+    Once recorded they then never moved, and there is no signal that would tell us to look:
+    commenting does not touch `update_time`, and 26 of the 403 documents that have comments
+    carry one newer than the body's own timestamp. So the record's mtime is the clock, the
+    way `.nobody`'s is. Reading it costs a parse, which is why the cheap stat runs first --
+    the answer for all but a handful of documents on any given run is no.
     """
-    return not (store.exists(f"docs/{token}/comments.yaml") or store.exists(f"docs/{token}/.nocomments"))
+    if store.exists(f"docs/{token}/.nocomments"):
+        return False
+    record = store.root / f"docs/{token}/comments.yaml"
+    if not record.exists():
+        return True
+    age = datetime.now(UTC).timestamp() - record.stat().st_mtime
+    if age < COMMENT_HOURS * 3600:
+        return False
+    return age > COMMENT_EMPTY_HOURS * 3600 or bool(store.read_yaml(f"docs/{token}/comments.yaml").get("items"))
 
 
 def _doc_is_stale(store: Store, token: str, meta: dict) -> bool:

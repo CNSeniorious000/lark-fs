@@ -1420,3 +1420,33 @@ def test_a_document_with_more_comments_than_one_page_keeps_all_of_them(tmp_path,
 
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert len(store.read_yaml("docs/busy/comments.yaml")["items"]) == 83, "the second page was dropped"
+
+
+def test_comments_are_asked_about_again_once_the_record_is_old(tmp_path):
+    """Nothing tells the mirror a comment was posted: commenting does not touch the body's
+    `update_time`, and 26 of the 403 documents that have comments carry one newer than it.
+    So a record written once stayed as it was forever -- and the two that matter move at
+    different speeds, since a document that already has comments is where the next one
+    appears while 87% of the corpus has none and never will."""
+    from lark_fs.sync import COMMENT_EMPTY_HOURS, COMMENT_HOURS, _doc_wants_comments
+
+    store = Store(tmp_path)
+    for token, record in (("busy", {"count": 1, "items": [{"comment_id": "1"}]}), ("quiet", {"count": 0, "items": []})):
+        store.write_yaml(f"docs/{token}/meta.yaml", {"token": token})
+        store.write_yaml(f"docs/{token}/comments.yaml", record)
+    assert not _doc_wants_comments(store, "busy"), "a record written moments ago is current"
+
+    def age(token: str, hours: float):
+        path = tmp_path / f"docs/{token}/comments.yaml"
+        utime(path, (path.stat().st_atime, datetime.now(UTC).timestamp() - hours * 3600 - 60))
+
+    age("busy", COMMENT_HOURS)
+    age("quiet", COMMENT_HOURS)
+    assert _doc_wants_comments(store, "busy"), "a document with comments is where the next one appears"
+    assert not _doc_wants_comments(store, "quiet"), "asking every empty document daily is 87% of the corpus for nothing"
+
+    age("quiet", COMMENT_EMPTY_HOURS)
+    assert _doc_wants_comments(store, "quiet"), "but a document without comments can still get its first"
+
+    store.write("docs/quiet/.nocomments", "")
+    assert not _doc_wants_comments(store, "quiet"), "a permanent verdict outranks any clock"
