@@ -243,6 +243,16 @@ class LarkError(Exception):
         return self._code == 3380002
 
     @property
+    def is_unlistable_type(self):
+        """lark-cli refused to send it: the token resolves to a kind the comments endpoint
+        does not name. There is no API code because there was no API call.
+
+        Permanent, like `is_missing`, and the mirror holds one -- a mindnote, which no
+        `--type` reaches. Left unrecognised it is a request every run, forever.
+        """
+        return "comments list only supports" in str(self.payload)
+
+    @property
     def is_quota_exhausted(self):
         """99991403: the tenant's *monthly* API allowance is gone.
 

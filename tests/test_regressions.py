@@ -1354,3 +1354,31 @@ def test_a_wiki_only_document_is_still_addressable_after_the_search_that_found_i
     asked.clear()
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert asked == [("node_orphan", "wiki")], f"the next run only has the directory to go on, and must reach the same document: {asked}"
+
+
+def test_a_kind_the_comments_endpoint_cannot_name_is_not_asked_again(tmp_path, monkeypatch):
+    """The mirror holds one mindnote, and no `--type` reaches it: `mindnote` is not a value
+    the endpoint accepts, `docx` gets 1069307, and `wiki` gets lark-cli's own refusal before
+    the request is even sent. That last one carries no API code, so it read as transient and
+    the document was asked again on every run, forever."""
+    from lark_fs import sync as sync_module
+
+    payload = {"error": {"type": "validation", "subtype": "invalid_argument", "message": 'wiki resolved to "mindnote", but comments list only supports doc, docx, sheet, file, slides, bitable, and apps', "param": "--token"}}
+    calls = 0
+
+    async def fake_run(*argv, **_):
+        nonlocal calls
+        calls += 1
+        raise cli.LarkError(list(argv), payload)
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/mind/meta.yaml", {"token": "mind", "doc_types": "MINDNOTE", "entity_type": "WIKI", "comment_type": "wiki"})
+    store.write("docs/mind/.nobody", "unsupported")
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert calls == 1, "the body is already known to be unexportable, so only comments were due"
+    assert (tmp_path / "docs/mind/.nocomments").exists(), "a refusal the endpoint will repeat verbatim has to be remembered"
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert calls == 1, f"and it must not be asked a second time: {calls} calls"

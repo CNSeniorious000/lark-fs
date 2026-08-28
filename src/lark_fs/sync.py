@@ -751,9 +751,10 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             # comments that way, to a mistake of our own.
             comments = await cli.run("drive", "+list-comments", "--token", token, "--type", _doc_type(seen[token]), "--solved-status", "all")
         except cli.LarkError as e:
-            # a token Drive does not recognise never will; anything else may just be a
-            # rate limit, and marking that would lose the comments for good
-            if e.is_missing:
+            # a token Drive does not recognise never will, and neither does a kind the
+            # endpoint cannot name; anything else may just be a rate limit, and marking
+            # that would lose the comments for good
+            if e.is_missing or e.is_unlistable_type:
                 store.write(f"docs/{token}/.nocomments", "")
             return
         # The answer is the record, empty or not. Writing only a non-empty one left the
