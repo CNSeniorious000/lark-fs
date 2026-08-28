@@ -1572,6 +1572,18 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
     run(_resolve_notes(store, Progress()))
     assert len(asked) == 1, f"the answer is on disk; asking again buys nothing: {asked}"
 
+    store.write_yaml("meetings/m2/detail.yaml", {"meeting_id": "m2", "note_id": "7664944480836078831"})
+
+    async def denied(*argv, **_):
+        asked.append(argv[argv.index("--note-id") + 1])
+        raise cli.LarkError(list(argv), {"error": {"code": 121005, "message": "no read permission for this note"}})
+
+    monkeypatch.setattr(cli, "run", denied)
+    run(_resolve_notes(store, Progress()))
+    run(_resolve_notes(store, Progress()))
+    assert store.read_yaml("notes/7664944480836078831.yaml")["forbidden"] is True
+    assert len(asked) == 2, f"a refusal is an answer too, and recording it is what stops the daily retry: {asked}"
+
 
 def test_a_search_window_does_not_pay_for_a_rejection_first(tmp_path, monkeypatch):
     """`paginate` defaults to 50 per page and both search endpoints reject anything over 30

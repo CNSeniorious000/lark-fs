@@ -1207,8 +1207,12 @@ async def _resolve_notes(store: Store, p: Progress):
     async def one(note_id: str):
         try:
             data = await cli.run("note", "+detail", "--note-id", note_id)
-        except cli.LarkError:
-            return  # transient: leave it unresolved, the next run asks again
+        except cli.LarkError as e:
+            if e.is_forbidden:
+                # one note on this store, and unlike a document it will not be shared later:
+                # the meeting is over. Recording the refusal is what stops the daily retry.
+                store.write_yaml(f"notes/{note_id}.yaml", {"note_id": note_id, "forbidden": True})
+            return  # anything else is transient: leave it unresolved, the next run asks again
         note = (data or {}).get("note") or {}
         store.write_yaml(f"notes/{note_id}.yaml", _clean(note))
         links.extend((t, "docx") for t in (note.get("note_doc_token"), note.get("verbatim_doc_token"), *(note.get("shared_doc_tokens") or [])) if t)

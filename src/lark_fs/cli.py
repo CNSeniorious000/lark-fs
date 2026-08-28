@@ -256,15 +256,15 @@ class LarkError(Exception):
     def is_forbidden(self):
         """The account can see that this exists and cannot read it.
 
-        Three shapes for one thing: `docs +fetch` answers 3380004, `drive +list-comments`
-        answers 131006, and `minutes +detail` says so in the body per token rather than as a
-        code, offering to ask the owner -- which this will not do on anyone's behalf. 189 of
-        the 710 minutes the meetings name are in this state, and they were 189 requests
-        every sync.
+        One thing, a different shape per endpoint: `docs +fetch` answers 3380004, `drive
+        +list-comments` 131006, `note +detail` 121005, and `minutes +detail` says so in the
+        body per token rather than as a code, offering to ask the owner -- which this will
+        not do on anyone's behalf. 189 of the 710 minutes the meetings name are in this
+        state, and they were 189 requests every sync.
 
         Unlike `is_missing` this can stop being true, so it is remembered as a clock.
         """
-        return self._code in (3380004, 131006) or "No read permission" in str(self.payload)
+        return self._code in (3380004, 131006, 121005) or "No read permission" in str(self.payload)
 
     @property
     def is_quota_exhausted(self):
