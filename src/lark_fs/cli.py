@@ -227,11 +227,11 @@ class LarkError(Exception):
         """This endpoint will never have anything for that token.
 
         Permanent, unlike a rate limit -- worth remembering, so the same request is not
-        reissued on every run. Drive says 1069307; Base says 91402 for a token it does not
-        have and 800004006 for one that was never a base to begin with, which the document
-        corpus hands it a couple of.
+        reissued on every run. Drive says 1069307 for a token it does not have and 1069304
+        for a document that has been deleted; Base says 91402, and 800004006 for a token
+        that was never a base to begin with, which the document corpus hands it a couple of.
         """
-        return self._code in (1069307, 91402, 800004006)
+        return self._code in (1069307, 1069304, 91402, 800004006)
 
     @property
     def is_unsupported_type(self):
@@ -269,14 +269,14 @@ class LarkError(Exception):
         """The account can see that this exists and cannot read it.
 
         One thing, a different shape per endpoint: `docs +fetch` answers 3380004, `drive
-        +list-comments` 131006, `note +detail` 121005, and `minutes +detail` says so in the
-        body per token rather than as a code, offering to ask the owner -- which this will
-        not do on anyone's behalf. 189 of the 710 minutes the meetings name are in this
-        state, and they were 189 requests every sync.
+        +list-comments` 131006 or 1069303, `note +detail` 121005, and `minutes +detail` says
+        so in the body per token rather than as a code, offering to ask the owner -- which
+        this will not do on anyone's behalf. 189 of the 710 minutes the meetings name are in
+        this state, and they were 189 requests every sync.
 
         Unlike `is_missing` this can stop being true, so it is remembered as a clock.
         """
-        return self._code in (3380004, 131006, 121005) or "No read permission" in str(self.payload)
+        return self._code in (3380004, 131006, 121005, 1069303) or "No read permission" in str(self.payload)
 
     @property
     def is_quota_exhausted(self):

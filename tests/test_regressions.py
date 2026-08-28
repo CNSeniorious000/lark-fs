@@ -1750,3 +1750,35 @@ def test_a_wiki_link_that_is_not_a_node_settles_after_one_retry(tmp_path, monkey
     (tmp_path / "docs/notreallyanode000000001/comments.yaml").unlink()
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert asked == ["docx"], f"the meta now says what it is, so the wrong guess is not made twice: {asked}"
+
+
+def test_every_answer_drive_gives_about_a_comment_list_is_recorded(tmp_path, monkeypatch):
+    """Drive has five ways to say "not this one" and only two were recognised, so a document
+    that got either of the others was asked again on every run with nothing to show for it:
+    22 were stuck that way after the rest had settled. 1069304 is a deleted document, as
+    permanent as 1069307; 1069303 is a permission refusal, which can be granted later and so
+    is a clock rather than a verdict."""
+    from lark_fs import sync as sync_module
+
+    codes = {"deleted10000000000000001": 1069304, "refused10000000000000001": 1069303}
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+fetch":
+            return {"document": {"content": "body"}}
+        asked.append(token := argv[argv.index("--token") + 1])
+        raise cli.LarkError(list(argv), {"error": {"code": codes[token]}})
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    for token in codes:
+        store.write_yaml(f"docs/{token}/meta.yaml", {"token": token, "doc_types": "DOCX"})
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert sorted(asked) == sorted(codes)
+    assert (tmp_path / "docs/deleted10000000000000001/.nocomments").read_text() == "", "a deleted document does not come back"
+    assert (tmp_path / "docs/refused10000000000000001/.nocomments").read_text() == "forbidden", "a refusal can be lifted, so it is a clock"
+
+    asked.clear()
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert asked == [], f"both answers are on disk now: {asked}"
