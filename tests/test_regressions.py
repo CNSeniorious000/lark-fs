@@ -1671,3 +1671,26 @@ def test_a_document_nobody_shared_is_not_re_fetched_every_sync(tmp_path, monkeyp
         utime(mark, (mark.stat().st_atime, datetime.now(UTC).timestamp() - sync_module.NOACCESS_HOURS * 3600 - 60))
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert len(fetched) == 2, "but it can be shared later, so the marker is a clock"
+
+
+def test_a_token_that_was_never_a_base_does_not_cost_the_whole_day(tmp_path, monkeypatch):
+    """The document corpus names 187 bitables and two of them are not: Base answers 91402
+    and 800004006, which will not change. Counting those as "this pass was cut short" meant
+    the sweep never claimed its day, so all 185 bases were listed again on every single run
+    -- more requests than a whole clean sync, forever."""
+    from lark_fs import sync as sync_module
+    from lark_fs.sync import BASE_HOURS, swept_recently
+
+    async def fake_run(*argv, **_):
+        if argv[argv.index("--base-token") + 1] == "notabase":
+            raise cli.LarkError(list(argv), {"error": {"code": 800004006, "message": "param baseToken is invalid"}})
+        return {"tables": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))
+    store = Store(tmp_path)
+    store.write_yaml("docs/notabase/meta.yaml", {"token": "notabase", "doc_types": "BITABLE"})
+    store.write_yaml("docs/realbase/meta.yaml", {"token": "realbase", "doc_types": "BITABLE"})
+
+    run(sync_module.sync_bases(store, Progress()))
+    assert swept_recently(store, "bases", BASE_HOURS), "the day was claimed by a pass that answered everything it could"

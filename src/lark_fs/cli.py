@@ -224,12 +224,14 @@ class LarkError(Exception):
 
     @property
     def is_missing(self):
-        """1069307: this endpoint will never have anything for that token.
+        """This endpoint will never have anything for that token.
 
         Permanent, unlike a rate limit -- worth remembering, so the same request is not
-        reissued on every run.
+        reissued on every run. Drive says 1069307; Base says 91402 for a token it does not
+        have and 800004006 for one that was never a base to begin with, which the document
+        corpus hands it a couple of.
         """
-        return self._code == 1069307
+        return self._code in (1069307, 91402, 800004006)
 
     @property
     def is_unsupported_type(self):

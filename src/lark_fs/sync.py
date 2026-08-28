@@ -1269,8 +1269,11 @@ async def sync_bases(store: Store, p: Progress):
         nonlocal whole_pass
         try:
             tables = await cli.run("base", "+table-list", "--base-token", app_token, "--limit", "100")
-        except cli.LarkError:
-            whole_pass = False
+        except cli.LarkError as e:
+            # a token that is not a base will never be one, and two of the ones the document
+            # corpus names are exactly that -- counting them as "cut short" meant the day was
+            # never claimed and all 185 were listed again on every single run
+            whole_pass = whole_pass and e.is_missing
             return
         for t in (tables or {}).get("tables") or []:
             tid = t.get("id")
