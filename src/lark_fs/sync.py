@@ -355,7 +355,12 @@ def _flush_media(store: Store, rows: list[dict]):
 # bodies link 13203 of them, mostly their own embedded attachments, against 495 real
 # documents. A stub each would be a fetch and a comments call apiece for a title.
 LINK_TYPES = {"docx": "docx", "docs": "doc", "sheets": "sheet", "base": "bitable", "slides": "slides", "wiki": "wiki"}
-RE_DOC_LINK = compile(r"(?:feishu\.cn|larksuite\.com)/(" + "|".join(LINK_TYPES) + r")/([A-Za-z0-9]{20,30})")
+# A token is 27 characters, or 26 for an old-style `wikcn` node -- 3628 of the 3633 on
+# disk. A looser bound reads whatever a message glued onto the end of the URL as part of
+# the token, which mirrors a document that does not exist *instead of* the one that does:
+# five such directories, one of them hiding a real document nothing else had found. The
+# match is greedy, so it takes the 27 that are the token and leaves the rest.
+RE_DOC_LINK = compile(r"(?:feishu\.cn|larksuite\.com)/(" + "|".join(LINK_TYPES) + r")/([A-Za-z0-9]{26,27})")
 
 
 def _doc_links(text: str) -> list[tuple[str, str]]:

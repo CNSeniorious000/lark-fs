@@ -1510,17 +1510,19 @@ def test_a_document_only_ever_linked_in_a_chat_is_still_mirrored(tmp_path):
     from lark_fs.sync import _doc_links, _flush_doc_links
 
     store = Store(tmp_path)
-    store.write_yaml("wiki/s1/nodes.yaml", [{"node_token": "nodeknown0000000000000", "obj_token": "obj1000000000000000000", "obj_type": "docx"}])
+    store.write_yaml("wiki/s1/nodes.yaml", [{"node_token": "nodeKnown00000000000000001", "obj_token": "obj1000000000000000000", "obj_type": "docx"}])
     store.write_yaml("docs/obj1000000000000000000/meta.yaml", {"token": "obj1000000000000000000"})
-    text = "see https://x.feishu.cn/docx/PLAINDOCXTOKEN0000000001 and https://x.feishu.cn/base/BITABLETOKEN00000000001 and https://x.feishu.cn/wiki/nodeknown0000000000000 and https://x.feishu.cn/wiki/nodeorphan000000000000 and https://x.feishu.cn/file/EMBEDDEDATTACHMENT000001"
+    text = "see https://x.feishu.cn/docx/PlainDocxToken0000000000001 and https://x.feishu.cn/base/BitableToken00000000000001b, https://x.feishu.cn/wiki/nodeKnown00000000000000001 and https://x.feishu.cn/wiki/nodeOrphan0000000000000001 and https://x.feishu.cn/file/EmbeddedAttachment000000001 plus a glued one: https://x.feishu.cn/docx/GluedDocxToken0000000000001htt"
 
     _flush_doc_links(store, _doc_links(text))
 
-    assert store.read_yaml("docs/PLAINDOCXTOKEN0000000001/meta.yaml")["doc_types"] == "DOCX"
-    assert store.read_yaml("docs/BITABLETOKEN00000000001/meta.yaml")["doc_types"] == "BITABLE", "the URL says what it is, and nothing else does"
-    assert store.read_yaml("docs/nodeorphan000000000000/meta.yaml")["comment_type"] == "wiki", "a node token is only addressable as a wiki node"
-    assert not store.exists("docs/nodeknown0000000000000/meta.yaml"), "this is `obj1000000000000000000` under another name; mirroring both stores it twice"
-    assert not store.exists("docs/EMBEDDEDATTACHMENT000001/meta.yaml"), "a Drive file exports no markdown, and document bodies link 13203 of them"
+    assert store.read_yaml("docs/PlainDocxToken0000000000001/meta.yaml")["doc_types"] == "DOCX"
+    assert store.read_yaml("docs/BitableToken00000000000001b/meta.yaml")["doc_types"] == "BITABLE", "the URL says what it is, and nothing else does"
+    assert store.read_yaml("docs/nodeOrphan0000000000000001/meta.yaml")["comment_type"] == "wiki", "a node token is only addressable as a wiki node"
+    assert not store.exists("docs/nodeKnown00000000000000001/meta.yaml"), "this is `obj1000000000000000000` under another name; mirroring both stores it twice"
+    assert not store.exists("docs/EmbeddedAttachment000000001/meta.yaml"), "a Drive file exports no markdown, and document bodies link 13203 of them"
+    assert store.exists("docs/GluedDocxToken0000000000001/meta.yaml"), "a token is 27 characters; what a message glued after it is not part of it"
+    assert not store.exists("docs/GluedDocxToken0000000000001htt/meta.yaml"), "mirroring the glued form put a document that does not exist in place of one that does"
 
 
 def test_a_minute_its_meeting_names_is_fetched_even_if_search_missed_it(tmp_path, monkeypatch):
