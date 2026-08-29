@@ -64,6 +64,10 @@ def _months_between(start: datetime, end: datetime) -> int:
     return (end.year - start.year) * 12 + end.month - start.month + 1
 
 
+# `need_transcript` too: the transcript comes back inside this response, and `+detail` was
+# only writing it to a file for us. Everything here is one request.
+ARTIFACTS = '{"need_summary":true,"need_todo":true,"need_chapter":true,"need_keyword":true,"need_transcript":true}'
+MINUTE_CARD_KEYS = ("display_info", "meta_data")  # what only `minutes +search` returns
 RE_MINUTE_TOKEN = compile(r"^minute_token: '?([A-Za-z0-9]+)'?$", MULTILINE)
 RE_BITABLE = compile(r"^(?:doc_types: BITABLE|obj_type: bitable)$", MULTILINE)  # a doc meta names its own type; a title that merely says "bitable" is not one
 RE_TENANT = compile(r"https://[a-z0-9-]+\.(?:feishu\.cn|larksuite\.com)")
@@ -473,6 +477,34 @@ def migrate_threads(store: Store) -> int:
             _write_thread(store, at.parents[1].name, at.name, root)
             split += bool(nested)
     return split
+
+
+def migrate_minutes(store: Store) -> int:
+    """Fold `minutes/<t>/{detail,chapters,todos}.yaml` into that minute's `meta.yaml`.
+
+    Four YAML files for two endpoints, and the key sets never overlapped: measured over the
+    553 that have both, `meta` was always {display_info, meta_data, token} and `detail`
+    always {minute_token, title, note_id}. Chapters and todos arrive inside the same
+    `artifacts` response as the summary, so a file boundary there said nothing.
+
+    Nothing is fetched. The record keeps what was on disk under the names `+detail` gave it,
+    and the next sweep replaces those with the raw endpoint's own -- which is also where the
+    owner, duration, cover, url and keywords finally land.
+    """
+    folded = 0
+    for at in sorted(store.root.glob("minutes/*")):
+        parts = {n: at / f"{n}.yaml" for n in ("detail", "chapters", "todos")}
+        if not at.is_dir() or not any(f.exists() for f in parts.values()):
+            continue
+        row = store.read_yaml(f"minutes/{at.name}/meta.yaml")
+        for name, f in parts.items():
+            if f.exists():
+                loaded = store.read_yaml(str(f.relative_to(store.root)))
+                row = {**row, **(loaded if name == "detail" else {name: loaded})}
+                f.unlink()
+        store.write_yaml(f"minutes/{at.name}/meta.yaml", row)
+        folded += 1
+    return folded
 
 
 def migrate_meetings(store: Store) -> int:
@@ -1107,13 +1139,17 @@ async def _sweep_window(lo: datetime, hi: datetime, cap: int, take: Callable[[da
 
 
 def _minute_is_due(store: Store, token: str) -> bool:
-    """True when the transcript is missing and it is worth asking for again.
+    """True when the record is short of what the two endpoints return, and worth asking again.
+
+    `owner_id` comes only from `minutes.get`, so its absence names a minute still carrying
+    the three fields the old `+detail` shortcut chose to emit -- 553 of them here, and the
+    owner, duration, cover, url and keywords arrive on the backfill.
 
     189 of the 710 minutes the meetings name answer "No read permission", and nothing on
     disk said so -- they were fetched again on every sync, forever. Access can be granted
     later, so the marker is a clock rather than a verdict, the way an empty `.nobody` is.
     """
-    if store.exists(f"minutes/{token}/transcript.txt"):
+    if store.exists(f"minutes/{token}/transcript.txt") and "owner_id" in store.read_yaml(f"minutes/{token}/meta.yaml"):
         return False
     mark = store.root / f"minutes/{token}/.noaccess"
     return not mark.exists() or datetime.now(UTC).timestamp() - mark.stat().st_mtime > NOACCESS_HOURS * 3600
@@ -1156,7 +1192,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
         month = nxt
 
     for token, item in found.items():
-        store.write_yaml(f"minutes/{token}/meta.yaml", _clean(item))
+        store.write_yaml(f"minutes/{token}/meta.yaml", {**store.read_yaml(f"minutes/{token}/meta.yaml"), **_clean(item)})
 
     # A recorded meeting names its minute, and `+search` did not always rank it: 191 of the
     # 710 minute tokens in meetings/*/detail.yaml had nothing under minutes/ at all. The
@@ -1166,25 +1202,32 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
     p.set("minutes", done=0, total=len(todo), note=f"fetching transcripts · {len(known)} minutes")
 
     async def detail(token: str):
+        """`minutes +detail` is these same two calls -- `--dry-run` prints both URLs -- and it
+        emits three fields out of the eight the first one returns, dropping the owner (an
+        open_id, the form this store links by), the duration, the create time, the cover and
+        the minute's own url. Its `artifacts` half it renames and then drops `keywords` from.
+        Asking the two endpoints directly costs the same two requests and keeps all of it.
+        """
         Aborted.check()
         try:
-            # +detail writes transcript.txt into <cwd>/minutes/<token>/ itself -- run it in the store so it lands in place
-            data = await cli.run("minutes", "+detail", "--minute-tokens", token, "--transcript", "--summary", "--todo", "--chapter", "--keyword", cwd=str(store.root))
+            base = await cli.run("minutes", "minutes", "get", "--minute-token", token)
         except cli.LarkError as e:
             if e.is_forbidden:
                 store.write(f"minutes/{token}/.noaccess", "")  # not permanent -- access can be granted, so the marker's mtime is when to look again
             return
         finally:
             p.bump("minutes", last=cli.summarise_title((found.get(token) or {}).get("display_info")))
-        for m in (data or {}).get("minutes") or []:
-            arts = m.get("artifacts") or {}
-            store.write_yaml(f"minutes/{token}/detail.yaml", _clean({k: v for k, v in m.items() if k != "artifacts"}))
-            if chapters := arts.get("chapters"):
-                store.write_yaml(f"minutes/{token}/chapters.yaml", _clean(chapters))
-            if todos := arts.get("todos"):
-                store.write_yaml(f"minutes/{token}/todos.yaml", _clean(todos))
-            if summary := arts.get("summary"):
-                store.write(f"minutes/{token}/summary.md", summary if isinstance(summary, str) else str(summary))
+        try:
+            arts = await cli.run("api", "GET", f"/open-apis/minutes/v1/minutes/{token}/artifacts", "--params", ARTIFACTS) or {}
+        except cli.LarkError:
+            arts = {}  # the AI products are the half that can be missing; the minute itself is not
+        # the two prose artifacts stay their own files: a transcript read through a YAML block
+        # scalar is not what `rg` is for. Everything else is one record.
+        for key, name in (("summary", "summary.md"), ("transcript", "transcript.txt")):
+            if text := arts.pop(key, None):
+                store.write(f"minutes/{token}/{name}", text if isinstance(text, str) else str(text))
+        card = {k: v for k, v in store.read_yaml(f"minutes/{token}/meta.yaml").items() if k in MINUTE_CARD_KEYS}
+        store.write_yaml(f"minutes/{token}/meta.yaml", {**card, **_clean((base or {}).get("minute") or {}), **_clean(arts)})
 
     await cli.spread(detail, todo)
     if full:
@@ -1527,6 +1570,7 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     _learn_tenant(store)
     migrate_threads(store)
     migrate_meetings(store)
+    migrate_minutes(store)
     want = set(only or ALL)
     named: dict[str, Any] = {}  # by the row each one reports under, so a failure lands where it is drawn
 

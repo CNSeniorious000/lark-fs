@@ -93,7 +93,7 @@ instead of being buried in `\n` escapes.
     files/<file_key>/<original name>       # the attachment itself, when its kind is enabled
   users/<open_id>/meta.yaml
   docs/<doc_token>/{meta.yaml,content.md,comments.yaml}
-  minutes/<token>/{meta.yaml,transcript.txt,summary.md,chapters.yaml,todos.yaml}
+  minutes/<token>/{meta.yaml,transcript.txt,summary.md}    # owner, duration, chapters, todos, keywords
   meetings/<meeting_id>.yaml                       # host, participants, minute_token / note_id
   notes/<note_id>.yaml                             # which documents a meeting note is made of
   bases/<app_token>/tables/<table_id>/{meta.yaml,records.yaml}
@@ -144,11 +144,15 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
   update time and a search returns a ranked slice with no cursor — so they run on a clock
   instead: the wiki tree once a day, the doc search probes every six hours, chat rosters
   once a day, profiles once a week. Naming one explicitly (`--only wiki`) always sweeps it.
-- **a meeting is one file**, because the two endpoints that describe it are two halves of
-  one row, not two things: `vc +detail` is `meeting.get` plus the recording endpoint (its own
-  `--dry-run` says so) and it emitted six of the twenty fields they return. The host, the
-  status, the participant counts, the recording's duration and url, and the participant list
-  — which `with_participants` adds to a request already being paid for — were all dropped.
+- **a meeting is one file, and so is a minute**, because the two endpoints that describe
+  each are two halves of one row, not two things. `vc +detail` is `meeting.get` plus the
+  recording endpoint (its own `--dry-run` says so) and it emitted six of the twenty fields
+  they return: the host, the status, the participant counts, the recording's duration and
+  url, and the participant list — which `with_participants` adds to a request already being
+  paid for — were all dropped. `minutes +detail` is `minutes.get` plus the artifacts
+  endpoint, and it emitted three of the first one's eight, losing the owner's open_id, the
+  duration, the create time, the cover and the minute's own url, plus the keywords its own
+  `--keyword` flag had asked for. Both are now asked for directly, at the same request cost.
 - **minutes / meetings** are found by walking month by month, because `+search` caps the
   total a query can return. A window that comes back at that ceiling is halved down to a
   day, since a month is not always narrow enough. A plain sync walks only this month and

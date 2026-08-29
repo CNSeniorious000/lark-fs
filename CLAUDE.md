@@ -58,8 +58,11 @@ Known traps, all hit in practice:
 - `im +chat-list` returns `chats`; members come from `+chat-members-list` as `users` + `bots`
   keyed by `member_id`, and need `im:chat.members:read` on top of `im:chat:read`.
 - `wiki +node-list` returns one level; recurse via `has_child` + `--parent-node-token`.
-- `minutes +detail --transcript` writes `<cwd>/minutes/<token>/transcript.txt` itself
-  instead of returning it, so it must run with `cwd` set to the store root.
+- `minutes +detail` is `minutes.get` + `GET /minutes/v1/minutes/{t}/artifacts` (its
+  `--dry-run` prints both) and emits three of the first's eight fields, renames the second's
+  and drops `keywords`. It is also the reason `--transcript` needed `cwd` set to the store
+  root: it wrote the file itself rather than returning it. Both endpoints are asked directly
+  now, for the same two requests. `artifacts` needs its flags as a `--params` JSON object.
 - Search endpoints return HTML-entity-escaped text with `<h>` hit markers; unescape it
   or the on-disk copy is not greppable. Use `_clean`, never bare `html.unescape` — the
   stdlib also decodes semicolon-less entities, so `&timestamp=` in a URL silently becomes

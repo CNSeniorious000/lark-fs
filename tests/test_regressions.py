@@ -1545,8 +1545,9 @@ def test_a_minute_its_meeting_names_is_fetched_even_if_search_missed_it(tmp_path
     asked: list[str] = []
 
     async def fake_run(*argv, **_):
-        asked.append(argv[argv.index("--minute-tokens") + 1])
-        return {"minutes": []}
+        if "--minute-token" in argv:
+            asked.append(argv[argv.index("--minute-token") + 1])
+        return {}
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))  # the search ranks nothing this run
@@ -1632,7 +1633,7 @@ def test_a_minute_nobody_shared_is_not_fetched_forever(tmp_path, monkeypatch):
     payload = {"minutes": [{"minute_token": "obcnDenied0000000000", "error": "No read permission for minute obcnDenied0000000000. Ask the user before running: minutes +apply-permission ..."}]}
 
     async def fake_run(*argv, **_):
-        asked.append(argv[argv.index("--minute-tokens") + 1])
+        asked.append(argv[argv.index("--minute-token") + 1])
         raise cli.LarkError(list(argv), {"ok": False, "data": payload})
 
     monkeypatch.setattr(cli, "run", fake_run)
@@ -2060,3 +2061,80 @@ def test_the_search_card_survives_the_structured_fetch(tmp_path, monkeypatch):
     row = store.read_yaml("meetings/m1.yaml")
     assert "hint" not in row, "a field that stopped coming back was left stranded next to the token that contradicts it"
     assert row["display_info"] == "organiser 陈锴杰 KJ", "and the card still has to survive that"
+
+
+def test_a_minute_keeps_everything_its_two_calls_return(tmp_path, monkeypatch):
+    """`minutes +detail` is `minutes minutes get` plus the artifacts endpoint, and it emitted
+    three fields of the eight the first returns -- dropping the owner (an open_id), the
+    duration, the create time, the cover and the minute's own url. Of the four artifacts it
+    does return, our own code took three: `--keyword` was passed, nineteen keywords came
+    back, and nothing read them. Asking both endpoints directly costs the same two requests."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[0] == "api":
+            return {"keywords": ["迭代", "算法"], "minute_chapters": [{"title": "开场"}], "minute_todos": [{"content": "x"}], "summary": "总结正文", "transcript": "13:55 有人说了话"}
+        return {
+            "minute": {
+                "token": "obc1",
+                "title": "组会",
+                "owner_id": "ou_kj",
+                "duration": "7426000",
+                "create_time": "1787723733679",
+                "cover": "https://x/cover",
+                "url": "https://x/minutes/obc1",
+                "note_id": "76782",
+            }
+        }
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"token": "obc1", "display_info": "组会卡片", "meta_data": {"app_link": "https://x"}}]))
+    store = Store(tmp_path)
+    run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
+
+    row = store.read_yaml("minutes/obc1/meta.yaml")
+    for key in ("owner_id", "duration", "create_time", "cover", "url", "note_id", "title"):
+        assert key in row, f"{key} came back from the endpoint and was dropped"
+    assert row["keywords"] == ["迭代", "算法"], "the flag was passed, the answer came back, and nobody read it"
+    assert row["minute_chapters"] and row["minute_todos"], "chapters and todos arrive in the same response as the summary"
+    assert row["display_info"] == "组会卡片", "the search card is the other half of the record, not a casualty of it"
+    assert (tmp_path / "minutes/obc1/summary.md").read_text() == "总结正文"
+    assert (tmp_path / "minutes/obc1/transcript.txt").read_text() == "13:55 有人说了话", "prose stays its own file so rg reads it as lines"
+
+
+def test_the_four_minute_yamls_become_one(tmp_path):
+    """Four YAML files for two endpoints, with key sets that never overlapped across the 553
+    that had both. Nothing is fetched: the record keeps what was on disk, and the next sweep
+    replaces it with the raw endpoint's own names."""
+    from lark_fs.sync import migrate_minutes
+
+    store = Store(tmp_path)
+    store.write_yaml("minutes/obc1/meta.yaml", {"token": "obc1", "display_info": "卡片"})
+    store.write_yaml("minutes/obc1/detail.yaml", {"minute_token": "obc1", "title": "组会", "note_id": "76782"})
+    store.write_yaml("minutes/obc1/chapters.yaml", [{"title": "开场"}])
+    store.write_yaml("minutes/obc1/todos.yaml", [{"content": "x"}])
+    store.write("minutes/obc1/transcript.txt", "有人说了话")
+
+    assert migrate_minutes(store) == 1
+    row = store.read_yaml("minutes/obc1/meta.yaml")
+    assert row["display_info"] == "卡片" and row["title"] == "组会" and row["note_id"] == "76782"
+    assert row["chapters"] == [{"title": "开场"}] and row["todos"] == [{"content": "x"}], "a list is a field of the minute, not a file of its own"
+    assert not (tmp_path / "minutes/obc1/detail.yaml").exists()
+    assert (tmp_path / "minutes/obc1/transcript.txt").exists(), "prose is not folded in"
+    assert migrate_minutes(store) == 0, "a migrated store is not migrated again"
+
+
+def test_a_minute_fetched_before_the_owner_was_kept_is_asked_again(tmp_path):
+    """A transcript on disk used to be the whole test, so the 553 minutes already fetched
+    would have kept the three fields `+detail` emitted forever -- the fix would only ever
+    have applied to minutes nobody had seen yet. `owner_id` comes only from the structured
+    endpoint, so it says whether this record has been through it."""
+    from lark_fs.sync import _minute_is_due
+
+    store = Store(tmp_path)
+    store.write("minutes/obc1/transcript.txt", "有人说了话")
+    store.write_yaml("minutes/obc1/meta.yaml", {"token": "obc1", "title": "组会", "note_id": "76782"})
+    assert _minute_is_due(store, "obc1") is True, "a record still holding only what the shortcut emitted was never revisited"
+
+    store.write_yaml("minutes/obc1/meta.yaml", {"token": "obc1", "owner_id": "ou_kj", "duration": "7426000"})
+    assert _minute_is_due(store, "obc1") is False, "a backfilled minute is fetched again on every sync"
