@@ -1380,7 +1380,14 @@ def test_a_kind_the_comments_endpoint_cannot_name_is_not_asked_again(tmp_path, m
     the document was asked again on every run, forever."""
     from lark_fs import sync as sync_module
 
-    payload = {"error": {"type": "validation", "subtype": "invalid_argument", "message": 'wiki resolved to "mindnote", but comments list only supports doc, docx, sheet, file, slides, bitable, and apps', "param": "--token"}}
+    payload = {
+        "error": {
+            "type": "validation",
+            "subtype": "invalid_argument",
+            "message": 'wiki resolved to "mindnote", but comments list only supports doc, docx, sheet, file, slides, bitable, and apps',
+            "param": "--token",
+        }
+    }
     calls = 0
 
     async def fake_run(*argv, **_):
@@ -1563,7 +1570,9 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
 
     async def fake_run(*argv, **_):
         asked.append(argv[argv.index("--note-id") + 1])
-        return {"note": {"note_id": "7608565672679836877", "note_doc_token": "NoteDocToken00000000001", "verbatim_doc_token": "VerbatimToken0000000001", "shared_doc_tokens": ["SharedDocToken000000001"]}}
+        return {
+            "note": {"note_id": "7608565672679836877", "note_doc_token": "NoteDocToken00000000001", "verbatim_doc_token": "VerbatimToken0000000001", "shared_doc_tokens": ["SharedDocToken000000001"]}
+        }
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -1944,13 +1953,21 @@ def test_a_meeting_keeps_everything_the_two_calls_it_already_makes_return(tmp_pa
             return {}
         if argv[1] == "+recording":
             return {"recordings": [{"meeting_id": "m1", "minute_token": "obc_1", "duration": "1466000", "recording_url": "https://x/minutes/obc_1"}]}
-        return {"meeting": {
-            "id": "m1", "topic": "龙虾分享", "meeting_no": "475744216", "status": 3,
-            "create_time": "1776304822", "start_time": "1776304822", "end_time": "1776306288",
-            "host_user": {"id": "ou_host", "user_type": 1},
-            "participant_count": "27", "participant_count_accumulated": "29",
-            "participants": [{"id": "ou_someone", "first_join_time": "1776304830", "in_meeting_duration": "1458", "is_host": False}],
-        }}
+        return {
+            "meeting": {
+                "id": "m1",
+                "topic": "龙虾分享",
+                "meeting_no": "475744216",
+                "status": 3,
+                "create_time": "1776304822",
+                "start_time": "1776304822",
+                "end_time": "1776306288",
+                "host_user": {"id": "ou_host", "user_type": 1},
+                "participant_count": "27",
+                "participant_count_accumulated": "29",
+                "participants": [{"id": "ou_someone", "first_join_time": "1776304830", "in_meeting_duration": "1458", "is_host": False}],
+            }
+        }
 
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"id": "m1"}]))
@@ -1974,8 +1991,13 @@ def test_a_meetings_timestamps_stay_in_the_shape_two_passes_read(tmp_path):
     from lark_fs.sync import RE_START, TENANT_TZ, _earliest, _meeting_row
 
     row = _meeting_row(
-        {"id": "m1", "start_time": "1776304822", "end_time": "1776306288", "create_time": "1776304822",
-         "participants": [{"id": "ou_1", "first_join_time": "1776304830", "final_leave_time": "1776306288"}]},
+        {
+            "id": "m1",
+            "start_time": "1776304822",
+            "end_time": "1776306288",
+            "create_time": "1776304822",
+            "participants": [{"id": "ou_1", "first_join_time": "1776304830", "final_leave_time": "1776306288"}],
+        },
         {"minute_token": "obc_1"},
     )
     assert row["start_time"] == datetime.fromtimestamp(1776304822, TENANT_TZ).strftime("%Y-%m-%d %H:%M")
