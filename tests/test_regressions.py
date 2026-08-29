@@ -900,22 +900,25 @@ def test_a_meeting_still_waiting_for_its_minute_is_asked_again(tmp_path):
     so a detail fetched while it was running never has one. But a meeting the API has
     already answered for -- 133 of 842 have no minute at all and it says so in `hint` --
     must not be asked forever."""
-    from lark_fs.sync import TENANT_TZ, _meeting_detail_is_due
+    from lark_fs.sync import TENANT_TZ, _meeting_is_due
 
     store = Store(tmp_path)
     just_ended = (datetime.now(TENANT_TZ) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
     long_over = (datetime.now(TENANT_TZ) - timedelta(days=90)).strftime("%Y-%m-%d %H:%M")
 
-    store.write_yaml("meetings/m1/detail.yaml", {"end_time": just_ended})
-    assert _meeting_detail_is_due(store, "m1") is True, "a meeting that just ended was frozen without its minute"
+    store.write_yaml("meetings/m1.yaml", {"end_time": just_ended, "participants": []})
+    assert _meeting_is_due(store, "m1") is True, "a meeting that just ended was frozen without its minute"
 
-    store.write_yaml("meetings/m2/detail.yaml", {"end_time": long_over})
-    assert _meeting_detail_is_due(store, "m2") is False, "a meeting that will never have a minute is asked forever"
+    store.write_yaml("meetings/m2.yaml", {"end_time": long_over, "participants": []})
+    assert _meeting_is_due(store, "m2") is False, "a meeting that will never have a minute is asked forever"
 
-    store.write_yaml("meetings/m3/detail.yaml", {"end_time": just_ended, "minute_token": "obc_1"})
-    assert _meeting_detail_is_due(store, "m3") is False, "a detail that already has its minute was re-fetched"
+    store.write_yaml("meetings/m3.yaml", {"end_time": just_ended, "minute_token": "obc_1", "participants": []})
+    assert _meeting_is_due(store, "m3") is False, "a record that already has its minute was re-fetched"
 
-    assert _meeting_detail_is_due(store, "m4") is True, "a meeting with no detail at all was skipped"
+    assert _meeting_is_due(store, "m4") is True, "a meeting with nothing on disk at all was skipped"
+
+    store.write_yaml("meetings/m5.yaml", {"end_time": long_over, "minute_token": "obc_2"})
+    assert _meeting_is_due(store, "m5") is True, "a record written before participants were asked for must come back for them"
 
 
 def test_a_partial_chat_listing_does_not_shrink_the_sweep(tmp_path, monkeypatch):
@@ -1528,7 +1531,7 @@ def test_a_document_only_ever_linked_in_a_chat_is_still_mirrored(tmp_path):
 def test_a_minute_its_meeting_names_is_fetched_even_if_search_missed_it(tmp_path, monkeypatch):
     """`+search` caps at 50 per query, which is why minutes are walked month by month -- but
     a window at its ceiling still hides whatever ranked below it. A recorded meeting names
-    its minute in `detail.yaml`, and 191 of the 710 tokens named there had nothing under
+    its minute in its own record, and 191 of the 710 tokens named there had nothing under
     minutes/ at all. That token is everything `+detail` needs."""
     from lark_fs import sync as sync_module
 
@@ -1541,8 +1544,8 @@ def test_a_minute_its_meeting_names_is_fetched_even_if_search_missed_it(tmp_path
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))  # the search ranks nothing this run
     store = Store(tmp_path)
-    store.write_yaml("meetings/m1/detail.yaml", {"meeting_id": "m1", "minute_token": "obcnMinuteToken000001"})
-    store.write_yaml("meetings/m2/detail.yaml", {"meeting_id": "m2"})  # never recorded, so nothing to fetch
+    store.write_yaml("meetings/m1.yaml", {"meeting_id": "m1", "minute_token": "obcnMinuteToken000001"})
+    store.write_yaml("meetings/m2.yaml", {"meeting_id": "m2"})  # never recorded, so nothing to fetch
 
     run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
     assert asked == ["obcnMinuteToken000001"], f"the meeting was the only record that this minute exists: {asked}"
@@ -1564,7 +1567,7 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
-    store.write_yaml("meetings/m1/detail.yaml", {"meeting_id": "m1", "note_id": "7608565672679836877"})
+    store.write_yaml("meetings/m1.yaml", {"meeting_id": "m1", "note_id": "7608565672679836877"})
 
     run(_resolve_notes(store, Progress()))
     assert asked == ["7608565672679836877"]
@@ -1574,7 +1577,7 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
     run(_resolve_notes(store, Progress()))
     assert len(asked) == 1, f"the answer is on disk; asking again buys nothing: {asked}"
 
-    store.write_yaml("meetings/m2/detail.yaml", {"meeting_id": "m2", "note_id": "7664944480836078831"})
+    store.write_yaml("meetings/m2.yaml", {"meeting_id": "m2", "note_id": "7664944480836078831"})
 
     async def denied(*argv, **_):
         asked.append(argv[argv.index("--note-id") + 1])
@@ -1626,7 +1629,7 @@ def test_a_minute_nobody_shared_is_not_fetched_forever(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "run", fake_run)
     monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([]))
     store = Store(tmp_path)
-    store.write_yaml("meetings/m1/detail.yaml", {"meeting_id": "m1", "minute_token": "obcnDenied0000000000"})
+    store.write_yaml("meetings/m1.yaml", {"meeting_id": "m1", "minute_token": "obcnDenied0000000000"})
 
     run(sync_module.sync_minutes(store, Progress(), since="2026-08-01", full=False))
     assert asked == ["obcnDenied0000000000"]
@@ -1891,3 +1894,111 @@ def test_a_profiles_pass_that_resolves_nobody_still_claims_its_week(tmp_path, mo
 
     run(sync_module.sync_profiles(store, Progress()))
     assert swept_recently(store, "profiles", PROFILE_HOURS), "the endpoint answered; there was simply nobody to find"
+
+
+def test_the_chat_listing_is_filed_under_the_row_that_asked_for_it(tmp_path, monkeypatch):
+    """`sync_all` spawns the roster as a task, so it inherited whichever group was current
+    at spawn time. Under `watch` that is `daemon` -- the row the loop reports under between
+    sweeps -- which issues no other request, so its 40-deep feed never turned over: the
+    same five listing pages sat on screen for eight sweeps and read as a hot loop."""
+    from lark_fs import cli as cli_module
+    from lark_fs.sync import Progress, sync_all
+
+    listing = b'{"ok": true, "data": {"chats": [{"chat_id": "oc_1", "name": "somechat"}], "has_more": false}}'
+
+    class Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return listing, b""
+
+    monkeypatch.setattr(cli_module, "create_subprocess_exec", lambda *_a, **_k: _done(Proc()))
+    monkeypatch.setattr(cli_module, "activity", cli_module.Activity())
+    monkeypatch.setattr(cli_module, "feed_enabled", True)
+    cli_module.current_group.set("daemon")  # what the daemon leaves behind between sweeps
+
+    run(sync_all(tmp_path, Progress(), ["messages"]))
+
+    filed = {group: [s for _, s, _ in rows] for group, rows in cli_module.activity.done.items()}
+    assert not filed.get("daemon"), f"the listing was charged to the daemon row: {filed.get('daemon')}"
+    assert any(s.startswith("chat-list") for s in filed.get("messages", [])), f"the listing landed nowhere the sweep is drawn: {filed}"
+
+
+def test_a_meeting_keeps_everything_the_two_calls_it_already_makes_return(tmp_path, monkeypatch):
+    """`vc +detail` IS `meeting.get` plus the recording endpoint -- its own `--dry-run` prints
+    "meeting.get -> note_id + recording API -> minute_token" -- and it emitted six fields out
+    of the twenty they hand back. Thrown away on every one of 849 meetings: the host, the
+    status, both participant counts, the recording's duration and url, and the participant
+    list, which it never asked for at all even though `with_participants` is a query
+    parameter on a request the mirror was already paying for.
+
+    Participants are a field, not a file: they come back inside this same response, so there
+    is no state where the mirror has the meeting and not the people in it."""
+    from lark_fs import sync as sync_module
+
+    asked: list[tuple[str, ...]] = []
+
+    async def fake_run(*argv, **_):
+        asked.append(argv)
+        if argv[1] == "+search":
+            return {}
+        if argv[1] == "+recording":
+            return {"recordings": [{"meeting_id": "m1", "minute_token": "obc_1", "duration": "1466000", "recording_url": "https://x/minutes/obc_1"}]}
+        return {"meeting": {
+            "id": "m1", "topic": "龙虾分享", "meeting_no": "475744216", "status": 3,
+            "create_time": "1776304822", "start_time": "1776304822", "end_time": "1776306288",
+            "host_user": {"id": "ou_host", "user_type": 1},
+            "participant_count": "27", "participant_count_accumulated": "29",
+            "participants": [{"id": "ou_someone", "first_join_time": "1776304830", "in_meeting_duration": "1458", "is_host": False}],
+        }}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"id": "m1"}]))
+    store = Store(tmp_path)
+    run(sync_module.sync_meetings(store, Progress(), since="2026-08-01", full=False))
+
+    assert any(a[1] == "meeting" or "--with-participants" in a for a in asked), f"the participant list is free and was not asked for: {asked}"
+    row = store.read_yaml("meetings/m1.yaml")
+    assert row["host_user"]["id"] == "ou_host", "the organiser is an open_id the rest of the store links by"
+    assert row["status"] == 3 and row["participant_count"] == "27"
+    assert row["minute_token"] == "obc_1" and row["recording_url"] == "https://x/minutes/obc_1", "the recording half belongs in the same record"
+    assert [p["id"] for p in row["participants"]] == ["ou_someone"]
+    assert not store.exists("meetings/m1/detail.yaml"), "one meeting, one file"
+
+
+def test_a_meetings_timestamps_stay_in_the_shape_two_passes_read(tmp_path):
+    """`+detail` formatted the timestamps and the raw endpoint does not -- it returns unix
+    seconds. Two passes read the formatted shape: `_earliest` finds the month walk's start
+    with RE_START, and `_meeting_is_due` compares `end_time` against a STAMP string. Left as
+    epochs both fail silently -- the walk restarts at 2023 and every meeting reads as old."""
+    from lark_fs.sync import RE_START, TENANT_TZ, _earliest, _meeting_row
+
+    row = _meeting_row(
+        {"id": "m1", "start_time": "1776304822", "end_time": "1776306288", "create_time": "1776304822",
+         "participants": [{"id": "ou_1", "first_join_time": "1776304830", "final_leave_time": "1776306288"}]},
+        {"minute_token": "obc_1"},
+    )
+    assert row["start_time"] == datetime.fromtimestamp(1776304822, TENANT_TZ).strftime("%Y-%m-%d %H:%M")
+    assert row["participants"][0]["first_join_time"].startswith("20"), "a participant's clock is read by people, not machines"
+
+    store = Store(tmp_path)
+    store.write_yaml("meetings/m1.yaml", row)
+    assert RE_START.search((tmp_path / "meetings/m1.yaml").read_text()), "RE_START cannot see an epoch"
+    assert _earliest(store, "meetings", "", "*.yaml").year == 2026, "the month walk would have restarted at FIRST_MONTH"
+
+
+def test_the_two_meeting_halves_become_one_file(tmp_path):
+    """849 directories of exactly two files, whose top-level key sets never once overlapped.
+    The merge keeps what is on disk and fetches nothing; having no `participants` key is what
+    marks the record due, so the richer shape arrives with the next sweep."""
+    from lark_fs.sync import migrate_meetings
+
+    store = Store(tmp_path)
+    store.write_yaml("meetings/m1/meta.yaml", {"id": "m1", "display_info": "龙虾分享 - Nora\n\n4月16日 10:00 | organiser: 陈锴杰 KJ"})
+    store.write_yaml("meetings/m1/detail.yaml", {"meeting_id": "m1", "topic": "龙虾分享 - Nora", "minute_token": "obc_1"})
+
+    assert migrate_meetings(store) == 1
+    row = store.read_yaml("meetings/m1.yaml")
+    assert row["display_info"].startswith("龙虾分享") and row["minute_token"] == "obc_1", "neither half may be dropped"
+    assert not (tmp_path / "meetings/m1").exists(), "the directory held one entity and is gone"
+    assert migrate_meetings(store) == 0, "a migrated store is not migrated again"

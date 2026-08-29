@@ -94,7 +94,7 @@ instead of being buried in `\n` escapes.
   users/<open_id>/meta.yaml
   docs/<doc_token>/{meta.yaml,content.md,comments.yaml}
   minutes/<token>/{meta.yaml,transcript.txt,summary.md,chapters.yaml,todos.yaml}
-  meetings/<meeting_id>/{meta.yaml,detail.yaml}    # detail.yaml links minute_token / note_id
+  meetings/<meeting_id>.yaml                       # host, participants, minute_token / note_id
   notes/<note_id>.yaml                             # which documents a meeting note is made of
   bases/<app_token>/tables/<table_id>/{meta.yaml,records.yaml}
   wiki/<space_id>/{meta.yaml,nodes.yaml}
@@ -144,6 +144,11 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
   update time and a search returns a ranked slice with no cursor — so they run on a clock
   instead: the wiki tree once a day, the doc search probes every six hours, chat rosters
   once a day, profiles once a week. Naming one explicitly (`--only wiki`) always sweeps it.
+- **a meeting is one file**, because the two endpoints that describe it are two halves of
+  one row, not two things: `vc +detail` is `meeting.get` plus the recording endpoint (its own
+  `--dry-run` says so) and it emitted six of the twenty fields they return. The host, the
+  status, the participant counts, the recording's duration and url, and the participant list
+  — which `with_participants` adds to a request already being paid for — were all dropped.
 - **minutes / meetings** are found by walking month by month, because `+search` caps the
   total a query can return. A window that comes back at that ceiling is halved down to a
   day, since a month is not always narrow enough. A plain sync walks only this month and

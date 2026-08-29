@@ -10,12 +10,13 @@ from pathlib import Path
 from yaml import YAMLError, safe_load
 
 from .store import Store
-from .sync import _doc_links, _flush_doc_links, _flush_media, _index_media, _record_sender, migrate_threads
+from .sync import _doc_links, _flush_doc_links, _flush_media, _index_media, _record_sender, migrate_meetings, migrate_threads
 
 
 def reindex(root: Path) -> dict[str, int]:
     store = Store(root)
     split = migrate_threads(store)  # before the scan, so the messages it frees are indexed by it
+    migrate_meetings(store)
     known: set[str] = set()
     media: list[dict] = []
     links: list[tuple[str, str]] = []

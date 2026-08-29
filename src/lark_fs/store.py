@@ -20,7 +20,7 @@ plain lines instead of being buried in \n escapes.
       users/<open_id>/meta.yaml
       docs/<doc_token>/{meta.yaml,content.md,comments.yaml}
       minutes/<minute_token>/{meta.yaml,transcript.txt,summary.md,chapters.yaml,todos.yaml}
-      meetings/<meeting_id>/meta.yaml
+      meetings/<meeting_id>.yaml          # one call's worth of meeting, participants included
       notes/<note_id>.yaml                # the document tokens a meeting note resolves to
       bases/<app_token>/tables/<table_id>/{meta.yaml,records.yaml}
       wiki/<space_id>/{meta.yaml,nodes.yaml}

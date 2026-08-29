@@ -29,17 +29,20 @@ TZ = "+08:00"
 FIRST_MONTH = "2023-01-01"  # only used the first time, before the store can answer
 
 
-def _earliest(store: Store, collection: str, since: str) -> datetime:
+def _earliest(store: Store, collection: str, since: str, pattern: str = "*/*.yaml") -> datetime:
     """Where the month walk should start.
 
     Scanning from a fixed year re-queries every empty month before the account had any
     data -- for a workspace that started this year that is most of the requests. Once
     anything is on disk it says where history actually begins; back up one month so an
     entry that lands late still gets picked up.
+
+    `pattern` because the two collections that walk months are not the same shape: a minute
+    is a directory of artifacts, a meeting is one file.
     """
     if since:
         return datetime.fromisoformat(since).replace(tzinfo=UTC)
-    months = [m[1].replace(".", "-") for f in (store.root / collection).glob("*/*.yaml") if (m := RE_START.search(f.read_text()))]
+    months = [m[1].replace(".", "-") for f in (store.root / collection).glob(pattern) if (m := RE_START.search(f.read_text()))]
     if not months:
         return datetime.fromisoformat(FIRST_MONTH).replace(tzinfo=UTC)
     return (datetime.fromisoformat(f"{min(months)}-01").replace(tzinfo=UTC) - timedelta(days=1)).replace(day=1)
@@ -310,14 +313,20 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
     return known
 
 
-async def _list_chats(store: Store) -> set[str]:
+async def _list_chats(store: Store, group: str = "messages") -> set[str]:
     """Every chat the user belongs to, plus whatever is already mirrored.
+
+    It runs as a task of its own, so it inherits whichever group happened to be current
+    when it was spawned -- the daemon's, between sweeps -- and files its pages under a row
+    that issues no other request, where nothing ever displaces them. Claim the row that
+    wants the answer instead.
 
     A listing that fails on its third page still returns two pages of chats, and taking
     that as the answer silently drops every chat it had not reached yet -- for that whole
     run, message sweep included. The disk is not a fallback for that case, it is the floor:
     a chat that was mirrored once still exists whether or not this listing reached it.
     """
+    cli.current_group.set(group)
     found: set[str] = set()
     try:
         async for chat in cli.paginate("im", "+chat-list", "--types", "p2p,group", key="chats"):
@@ -464,6 +473,33 @@ def migrate_threads(store: Store) -> int:
             _write_thread(store, at.parents[1].name, at.name, root)
             split += bool(nested)
     return split
+
+
+def migrate_meetings(store: Store) -> int:
+    """Fold `meetings/<id>/{meta,detail}.yaml` into one `meetings/<id>.yaml`.
+
+    The two halves were two endpoints, not two things: measured over all 849, their
+    top-level key sets never once overlapped and `meta.id == detail.meeting_id == dirname`
+    on every one. The only fact `meta` held that `detail` did not was the organiser's
+    display name, rendered into a card -- and `vc meeting get` returns the organiser as an
+    open_id, which is the form the rest of this store links by.
+
+    Nothing is fetched here: the merged record keeps what was already on disk, and having
+    no `participants` key is what marks it due, so the richer shape arrives with the next
+    meetings sweep. Written before the directory is removed, so a run killed in between
+    leaves a store that reads correctly and finishes migrating next time.
+    """
+    folded = 0
+    for at in sorted(store.root.glob("meetings/*")):
+        if not at.is_dir():
+            continue
+        row = {**store.read_yaml(f"meetings/{at.name}/meta.yaml"), **store.read_yaml(f"meetings/{at.name}/detail.yaml")}
+        store.write_yaml(f"meetings/{at.name}.yaml", row)
+        for f in at.iterdir():
+            f.unlink()
+        at.rmdir()
+        folded += 1
+    return folded
 
 
 async def repair_thread(store: Store, thread: str, chat: str) -> list[dict]:
@@ -1125,7 +1161,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
     # A recorded meeting names its minute, and `+search` did not always rank it: 191 of the
     # 710 minute tokens in meetings/*/detail.yaml had nothing under minutes/ at all. The
     # token is all `+detail` needs, so nothing is written for one until it answers.
-    known = {*found} | {m[1] for f in (store.root / "meetings").glob("*/detail.yaml") for m in RE_MINUTE_TOKEN.finditer(f.read_text())}
+    known = {*found} | {m[1] for f in (store.root / "meetings").glob("*.yaml") for m in RE_MINUTE_TOKEN.finditer(f.read_text())}
     todo = [t for t in sorted(known) if _minute_is_due(store, t)]
     p.set("minutes", done=0, total=len(todo), note=f"fetching transcripts · {len(known)} minutes")
 
@@ -1164,10 +1200,13 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: boo
     p.set("meetings", state="running")
     ids: set[str] = set()  # a window that splits is walked again from its start, so this cannot be a list
     now = datetime.now(UTC)
-    month = _earliest(store, "meetings", since) if full else _recent(now)
+    month = _earliest(store, "meetings", since, "*.yaml") if full else _recent(now)
     p.set("meetings", total=_months_between(month, now))
     scanned = 0
 
+    # Nothing from the search is written down. What it returns is a rendered card, and the
+    # only fact in it the structured endpoint lacked was the organiser's display name --
+    # which `vc meeting get` gives as an open_id instead, the form this store links by.
     async def take(lo: datetime, hi: datetime) -> int:
         seen = 0
         try:
@@ -1175,7 +1214,6 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: boo
                 seen += 1
                 if mid := item.get("id"):
                     ids.add(mid)
-                    store.write_yaml(f"meetings/{mid}/meta.yaml", _clean(item))
         except cli.LarkError as e:
             if not e.is_pagination_exhausted:
                 raise
@@ -1192,20 +1230,33 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: boo
         p.set("meetings", done=scanned, note=f"scanning {month:%Y-%m} · {len(ids)} found")
         month = nxt
 
-    todo = [i for i in sorted(ids) if _meeting_detail_is_due(store, i)]
+    todo = [i for i in sorted(ids) if _meeting_is_due(store, i)]
     p.set("meetings", done=0, total=len(todo), note=f"fetching details · {len(ids)} meetings")
+    recordings: dict[str, dict] = {}
 
-    async def details(batch: list[str]):
+    async def recording(batch: list[str]):
+        """The minute half. Optional: a meeting nobody recorded is still worth writing down."""
         try:
-            data = await cli.run("vc", "+detail", "--meeting-ids", ",".join(batch))
+            data = await cli.run("vc", "+recording", "--meeting-ids", ",".join(batch))
         except cli.LarkError:
             return
-        finally:
-            p.bump("meetings", len(batch))
-        for m in (data or {}).get("meetings") or []:
-            store.write_yaml(f"meetings/{m['meeting_id']}/detail.yaml", _clean(m))
+        for r in (data or {}).get("recordings") or []:
+            if mid := r.get("meeting_id"):
+                recordings[mid] = {k: v for k, v in r.items() if k != "meeting_id"}
 
-    await cli.spread(details, [todo[i : i + 20] for i in range(0, len(todo), 20)])
+    async def detail(mid: str):
+        try:
+            data = await cli.run("vc", "meeting", "get", "--meeting-id", mid, "--with-participants")
+        except cli.LarkError:
+            return  # transient: leave it due, the next run retries it
+        finally:
+            p.bump("meetings")
+        if meeting := (data or {}).get("meeting") or {}:
+            store.write_yaml(f"meetings/{mid}.yaml", _clean(_meeting_row(meeting, recordings.get(mid) or {})))
+
+    # recordings first, so a meeting is written once with both halves in it
+    await cli.spread(recording, [todo[i : i + 20] for i in range(0, len(todo), 20)])
+    await cli.spread(detail, todo)
     await _resolve_notes(store, p)
     if full:
         record_sweep(store, "meetings")
@@ -1226,7 +1277,9 @@ async def _resolve_notes(store: Store, p: Progress):
     Asked once per note: the mapping is a fact about a meeting that already happened, so the
     answer on disk is the reason not to ask again.
     """
-    seen = {m[1] for d in ("meetings", "minutes") for f in (store.root / d).glob("*/detail.yaml") for m in RE_NOTE_ID.finditer(f.read_text())}
+    # a meeting is one file and a minute is a directory of them, so the two shapes are listed apart
+    files = [*(store.root / "meetings").glob("*.yaml"), *(store.root / "minutes").glob("*/detail.yaml")]
+    seen = {m[1] for f in files for m in RE_NOTE_ID.finditer(f.read_text())}
     todo = sorted(n for n in seen if not store.exists(f"notes/{n}.yaml"))
     if not todo:
         return
@@ -1250,21 +1303,57 @@ async def _resolve_notes(store: Store, p: Progress):
     _flush_doc_links(store, links)
 
 
-def _meeting_detail_is_due(store: Store, mid: str) -> bool:
-    """True when there is no detail yet, or the one on disk was taken too early to have one.
+# The three fields `vc meeting get` returns as unix seconds. `+detail` used to format these
+# for us, and two passes read the formatted shape -- `_earliest` through RE_START and
+# `_meeting_is_due` by comparing against a STAMP string -- so this has to happen here now.
+MEETING_EPOCHS = ("create_time", "start_time", "end_time")
+PARTICIPANT_EPOCHS = ("first_join_time", "final_leave_time")
+
+
+def _stamp(epoch) -> str:
+    return datetime.fromtimestamp(int(epoch), TENANT_TZ).strftime(STAMP)
+
+
+def _meeting_row(meeting: dict, recording: dict) -> dict:
+    """One meeting, as the two calls that describe it return it.
+
+    `vc +detail` is those same two calls -- `--dry-run` prints its own steps as
+    "meeting.get -> note_id + recording API -> minute_token" -- and it emits six fields out
+    of the twenty they hand back. Dropped on the floor: who hosted it, its status, how many
+    people came, how long the recording is and where it lives, and the participant list
+    entirely, which `+detail` never even asks for. `with_participants` is a query parameter
+    on a request the mirror was already paying for, so all of it is free.
+
+    Participants are a field and not a file: unlike comments, records, nodes or a chat
+    roster, they arrive inside this same response. There is no state where the mirror has
+    the meeting and not the people in it, so a file boundary there would mean nothing.
+    """
+    people = meeting.pop("participants", None) or []
+    row = {**meeting, **recording}
+    return {
+        **{k: (_stamp(v) if k in MEETING_EPOCHS and v else v) for k, v in row.items()},
+        "participants": [{k: (_stamp(v) if k in PARTICIPANT_EPOCHS and v else v) for k, v in one.items()} for one in people],
+    }
+
+
+def _meeting_is_due(store: Store, mid: str) -> bool:
+    """True when there is nothing on disk yet, or what is there was taken too early.
 
     `minute_token` and `note_id` appear only once the recording has been processed, which
-    is after the meeting ends -- so a detail fetched while it was still running never has
+    is after the meeting ends -- so a record fetched while it was still running never has
     them, and "the file exists" froze that. Only a meeting recent enough to still be
     waiting is worth another look: measured, 133 of 842 have no minute at all and the API
-    says so outright in `hint`, so asking those again buys nothing forever.
+    says so outright, so asking those again buys nothing forever.
+
+    A record with no `participants` key predates the mirror asking for them, and is due for
+    that reason alone -- which is what backfills the 849 written by the old `+detail` shape.
     """
-    detail = store.read_yaml(f"meetings/{mid}/detail.yaml")
-    if not detail:
+    row = store.read_yaml(f"meetings/{mid}.yaml")
+    if not row or "participants" not in row:
         return True
-    if detail.get("minute_token") or detail.get("note_id"):
+    if row.get("minute_token") or row.get("note_id"):
         return False
-    end = str(detail.get("end_time") or "")
+    end = str(row.get("end_time") or "")
     return bool(end and end > (datetime.now(TENANT_TZ) - timedelta(days=MEETING_SETTLE_DAYS)).strftime(STAMP))
 
 
@@ -1429,13 +1518,14 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     store = Store(root)
     _learn_tenant(store)
     migrate_threads(store)
+    migrate_meetings(store)
     want = set(only or ALL)
     named: dict[str, Any] = {}  # by the row each one reports under, so a failure lands where it is drawn
 
     # The roster is one request, and it is all the chat pass ever wanted. It used to be
     # taken from the message sweep's return value -- which meant waiting out a sweep of
     # every message in every chat for a set that sync_messages computes on its first line.
-    roster = create_task(_list_chats(store)) if want & {"messages", "chats"} else None
+    roster = create_task(_list_chats(store, "messages" if "messages" in want else "chats")) if want & {"messages", "chats"} else None
 
     async def walk_messages():
         return await sync_messages(store, p, chat_ids=await roster if roster else None)
