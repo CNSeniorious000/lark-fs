@@ -2002,3 +2002,39 @@ def test_the_two_meeting_halves_become_one_file(tmp_path):
     assert row["display_info"].startswith("龙虾分享") and row["minute_token"] == "obc_1", "neither half may be dropped"
     assert not (tmp_path / "meetings/m1").exists(), "the directory held one entity and is gone"
     assert migrate_meetings(store) == 0, "a migrated store is not migrated again"
+
+
+def test_the_search_card_survives_the_structured_fetch(tmp_path, monkeypatch):
+    """Nothing the API hands back is dropped because it looks derivable. The meeting card is
+    a rendered string and every line of it does appear elsewhere as a field -- but that is a
+    judgement, not a measurement, and it is 233 bytes. Both halves write the same file, so
+    each must replace only its own keys: the structured half wholesale, because a field that
+    stops coming back (`hint` means something by being absent) has to disappear with it."""
+    from lark_fs import sync as sync_module
+
+    recent = str(int((datetime.now(UTC) - timedelta(hours=1)).timestamp()))  # inside the settle window, so it stays due
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+recording":
+            return {}
+        return {"meeting": {"id": "m1", "topic": "t", "hint": "no minute file", "end_time": recent, "participants": []}}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"id": "m1", "display_info": "organiser 陈锴杰 KJ", "meta_data": {"app_link": "https://x"}}]))
+    store = Store(tmp_path)
+    run(sync_module.sync_meetings(store, Progress(), since="2026-08-01", full=False))
+
+    row = store.read_yaml("meetings/m1.yaml")
+    assert row["display_info"] == "organiser 陈锴杰 KJ" and row["meta_data"]["app_link"] == "https://x", "the card the search returned was thrown away"
+    assert row["topic"] == "t" and row["hint"] == "no minute file"
+
+    async def settled(*argv, **_):
+        if argv[1] == "+recording":
+            return {}
+        return {"meeting": {"id": "m1", "topic": "t", "minute_token": "obc_1", "end_time": recent, "participants": []}}  # `hint` is gone
+
+    monkeypatch.setattr(cli, "run", settled)
+    run(sync_module.sync_meetings(store, Progress(), since="2026-08-01", full=False))
+    row = store.read_yaml("meetings/m1.yaml")
+    assert "hint" not in row, "a field that stopped coming back was left stranded next to the token that contradicts it"
+    assert row["display_info"] == "organiser 陈锴杰 KJ", "and the card still has to survive that"

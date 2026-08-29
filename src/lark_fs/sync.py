@@ -1204,9 +1204,6 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: boo
     p.set("meetings", total=_months_between(month, now))
     scanned = 0
 
-    # Nothing from the search is written down. What it returns is a rendered card, and the
-    # only fact in it the structured endpoint lacked was the organiser's display name --
-    # which `vc meeting get` gives as an open_id instead, the form this store links by.
     async def take(lo: datetime, hi: datetime) -> int:
         seen = 0
         try:
@@ -1214,6 +1211,12 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: boo
                 seen += 1
                 if mid := item.get("id"):
                     ids.add(mid)
+                    # the card is kept, not derived away: everything in it looks reconstructible
+                    # from the structured half -- title, time, meeting number, the organiser as
+                    # an open_id -- but "looks reconstructible" is a judgement, and the rendered
+                    # form is 233 bytes. The two writers own disjoint keys, so each replaces its
+                    # own and leaves the other's alone.
+                    store.write_yaml(f"meetings/{mid}.yaml", {**store.read_yaml(f"meetings/{mid}.yaml"), **_clean(item)})
         except cli.LarkError as e:
             if not e.is_pagination_exhausted:
                 raise
@@ -1252,7 +1255,8 @@ async def sync_meetings(store: Store, p: Progress, *, since: str = "", full: boo
         finally:
             p.bump("meetings")
         if meeting := (data or {}).get("meeting") or {}:
-            store.write_yaml(f"meetings/{mid}.yaml", _clean(_meeting_row(meeting, recordings.get(mid) or {})))
+            card = {k: v for k, v in store.read_yaml(f"meetings/{mid}.yaml").items() if k in MEETING_CARD_KEYS}
+            store.write_yaml(f"meetings/{mid}.yaml", {**card, **_clean(_meeting_row(meeting, recordings.get(mid) or {}))})
 
     # recordings first, so a meeting is written once with both halves in it
     await cli.spread(recording, [todo[i : i + 20] for i in range(0, len(todo), 20)])
@@ -1307,6 +1311,10 @@ async def _resolve_notes(store: Store, p: Progress):
 # for us, and two passes read the formatted shape -- `_earliest` through RE_START and
 # `_meeting_is_due` by comparing against a STAMP string -- so this has to happen here now.
 MEETING_EPOCHS = ("create_time", "start_time", "end_time")
+# What only `vc +search` returns. Everything else in the record belongs to the structured
+# half, which replaces its own keys wholesale -- a field that stops coming back has to
+# disappear from disk, and `hint` is one that means something by being absent.
+MEETING_CARD_KEYS = ("display_info", "meta_data")
 PARTICIPANT_EPOCHS = ("first_join_time", "final_leave_time")
 
 
