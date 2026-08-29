@@ -2138,3 +2138,28 @@ def test_a_minute_fetched_before_the_owner_was_kept_is_asked_again(tmp_path):
 
     store.write_yaml("minutes/obc1/meta.yaml", {"token": "obc1", "owner_id": "ou_kj", "duration": "7426000"})
     assert _minute_is_due(store, "obc1") is False, "a backfilled minute is fetched again on every sync"
+
+
+def test_the_wiki_pass_does_not_erase_what_the_search_learned(tmp_path, monkeypatch):
+    """Both discovery passes run on every sync and both replaced the file whole. Search is a
+    ranked slice, so a document its queries missed this time had its owner, url and
+    `update_time` overwritten by the five keys a node list carries -- and `update_time` is the
+    only signal that says a body needs re-exporting, so those documents quietly stopped
+    refreshing. 2289 of 4140 on the real store held the thin row; not one held both."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*_a, **_k):
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "title": "方案", "owner_id": "ou_kj", "update_time": 1787889415, "url": "https://x/wiki/n1", "entity_type": "WIKI"})
+    store.write("docs/tok1/content.md", "an earlier export")
+    store.write_yaml("wiki/s1/nodes.yaml", [{"node_token": "n1", "obj_token": "tok1", "obj_type": "docx", "title": "方案", "space_id": "7383"}])
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+
+    row = store.read_yaml("docs/tok1/meta.yaml")
+    assert row["update_time"] == 1787889415, "the node list erased the only signal that says when to re-export the body"
+    assert row["owner_id"] == "ou_kj" and row["url"] == "https://x/wiki/n1", "a search row survives a run its queries missed"
+    assert row["wiki_node_token"] == "n1" and row["space_id"] == "7383", "and the node list still contributes what only it knows"

@@ -813,12 +813,14 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                     continue
                 title = _clean(r.get("title_highlighted"))
                 _note_tenant(meta.get("url", ""))
-                seen[token] = {**meta, "token": token, "title": title, **({"comment_type": kind} if kind else {})}
                 # `kind` has to survive to disk: 260 documents are addressable only as `wiki`,
                 # and a later run that meets one through the directory instead of a search hit
                 # would re-derive `docx` from `doc_types`, get 1069307, and file it as having no
-                # comments -- the first one tried this way had four.
-                store.write_yaml(f"docs/{token}/meta.yaml", {**meta, "token": token, "entity_type": r.get("entity_type"), "title": title, **({"comment_type": kind} if kind else {})})
+                # comments -- the first one tried this way had four. The row is merged over
+                # what is already there for the same reason the wiki pass merges: the two
+                # discovery routes describe the same document and know different things.
+                seen[token] = {**store.read_yaml(f"docs/{token}/meta.yaml"), **meta, "token": token, "entity_type": r.get("entity_type"), "title": title, **({"comment_type": kind} if kind else {})}
+                store.write_yaml(f"docs/{token}/meta.yaml", seen[token])
                 p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:
             probed = False  # cut short: the rest of this query's pages are gone, so the corpus on disk is partial
@@ -834,11 +836,14 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # wiki nodes point at real documents and are enumerated exhaustively, unlike search
     for node in store.glob_rows("wiki/*/nodes.yaml"):
         if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
-            seen[token] = {"title": node.get("title", ""), "obj_type": node.get("obj_type")}
-            store.write_yaml(
-                f"docs/{token}/meta.yaml",
-                {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")},
-            )
+            # Merged, not replaced. This pass runs on every sync and the search above is a
+            # ranked slice, so a document the queries missed this time used to have its whole
+            # search row -- owner, url, and the `update_time` that decides whether its body is
+            # re-exported -- overwritten by these five keys. 2289 of 4140 documents on this
+            # store were in that state, which is to say their bodies had stopped refreshing.
+            known = {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")}
+            seen[token] = {**store.read_yaml(f"docs/{token}/meta.yaml"), **known}
+            store.write_yaml(f"docs/{token}/meta.yaml", seen[token])
             p.bump("docs", last=cli.oneline(node.get("title")))
 
     # A search is a ranked slice, so `seen` is what this run happened to be handed -- not
