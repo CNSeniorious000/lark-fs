@@ -1025,9 +1025,11 @@ DOC_TYPES = {"doc", "docx", "sheet", "file", "slides", "bitable", "base", "apps"
 def _doc_type(meta: dict) -> str:
     """What Drive should be asked to recognise this token as.
 
-    A wiki node calls it `obj_type` and a search hit calls it `doc_types`, in upper case;
-    the two never appear on the same record. Measured with real tokens of each kind: asked
-    as itself every one answers, asked as `docx` every one answers 1069307.
+    A wiki node calls it `obj_type` and a search hit calls it `doc_types`, in upper case.
+    Both now land, since neither discovery pass replaces the other's row: 842 records carry
+    both and not one of them disagrees, which is why either order would do. Measured with
+    real tokens of each kind: asked as itself every one answers, asked as `docx` every one
+    answers 1069307.
 
     `comment_type` overrides both, and only the search loop sets it: a wiki hit whose node
     token it could not resolve is addressed as `wiki`, because that is the only name Drive
