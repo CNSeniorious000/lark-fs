@@ -2349,3 +2349,26 @@ def test_a_message_keeps_the_reactions_it_arrived_with(tmp_path, monkeypatch):
     assert flags and not any(flags), f"the walk asked for messages without the reactions on them: {flags}"
     row = store.read_yaml("chats/oc_1/messages/2026-08/om_1.yaml")
     assert row["reactions"][0]["reaction_type"]["emoji_type"] == "OK", f"the answer came back and nobody wrote it down: {row}"
+
+
+def test_the_account_we_run_as_is_a_person_the_store_already_has(tmp_path, monkeypatch):
+    """`+get-user` is asked on every profiles pass for one of the fourteen fields it answers
+    with, and the store already holds a file for the person it describes -- with four keys in
+    it, none of them the union_id, the employee number or the en_name that nothing else
+    reports. The request was already paid for."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+get-user":
+            return {"user": {"open_id": "ou_me", "tenant_key": "T", "name": "庄毅辉", "en_name": "Muspi", "union_id": "on_1", "employee_no": "42", "mobile": "+8613800000000"}}
+        return {"users": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("users/ou_me/meta.yaml", {"open_id": "ou_me", "member_id": "ou_me", "name": "庄毅辉", "tenant_key": "T"})
+
+    run(sync_module.sync_profiles(store, Progress()))
+
+    row = store.read_yaml("users/ou_me/meta.yaml")
+    assert row["union_id"] == "on_1" and row["employee_no"] == "42" and row["en_name"] == "Muspi", f"the answer was read for one field and thrown away: {row}"
+    assert row["member_id"] == "ou_me", "the roster's own fields are still there"

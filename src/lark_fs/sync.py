@@ -687,7 +687,7 @@ async def sync_profiles(store: Store, p: Progress):
     """
     p.set("profiles", state="running")
     try:
-        tenant = (((await cli.run("contact", "+get-user")) or {}).get("user") or {}).get("tenant_key")
+        me = ((await cli.run("contact", "+get-user")) or {}).get("user") or {}
     except cli.LarkError as e:
         # `contact:user:search` is a scope a tenant may simply not grant, and this pass is
         # the only one that needs it. Left to propagate it takes `sync_all` down with it,
@@ -695,6 +695,12 @@ async def sync_profiles(store: Store, p: Progress):
         # collection. A real install hit exactly this.
         p.set("profiles", state="error", note=_reason(e))
         return
+    tenant = me.get("tenant_key")
+    # This request is made every run for one of the fourteen fields it answers with, and the
+    # store already has a file for the person it describes -- holding four keys, none of them
+    # the union_id, the employee number or the en_name that only this endpoint reports.
+    if oid := me.get("open_id"):
+        store.write_yaml(f"users/{oid}/meta.yaml", _clean({**store.read_yaml(f"users/{oid}/meta.yaml"), **me}))
     on_disk = {d.name: store.read_yaml(f"users/{d.name}/meta.yaml") for d in (store.root / "users").glob("ou_*")}
     # a resolved profile is not a permanent one: an email, a department and an activation
     # state all change, and "localized_name is present" was reading as "done for good"
