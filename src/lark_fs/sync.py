@@ -1279,7 +1279,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
         store.write_yaml(f"minutes/{token}/meta.yaml", {**store.read_yaml(f"minutes/{token}/meta.yaml"), **_clean(item)})
 
     # A recorded meeting names its minute, and `+search` did not always rank it: 191 of the
-    # 710 minute tokens in meetings/*/detail.yaml had nothing under minutes/ at all. The
+    # 710 minute tokens in the meeting records had nothing under minutes/ at all. The
     # token is all `+detail` needs, so nothing is written for one until it answers.
     known = {*found} | {m[1] for f in (store.root / "meetings").glob("*.yaml") for m in RE_MINUTE_TOKEN.finditer(f.read_text())}
     todo = [t for t in sorted(known) if _minute_is_due(store, t)]
@@ -1409,7 +1409,7 @@ async def _resolve_notes(store: Store, p: Progress):
     answer on disk is the reason not to ask again.
     """
     # a meeting is one file and a minute is a directory of them, so the two shapes are listed apart
-    files = [*(store.root / "meetings").glob("*.yaml"), *(store.root / "minutes").glob("*/detail.yaml")]
+    files = [*(store.root / "meetings").glob("*.yaml"), *(store.root / "minutes").glob("*/meta.yaml")]
     seen = {m[1] for f in files for m in RE_NOTE_ID.finditer(f.read_text())}
     todo = sorted(n for n in seen if not store.exists(f"notes/{n}.yaml"))
     if not todo:

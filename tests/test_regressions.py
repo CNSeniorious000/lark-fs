@@ -2395,3 +2395,25 @@ def test_the_export_records_which_revision_it_is(tmp_path, monkeypatch):
 
     assert store.read_yaml("docs/tok1/meta.yaml")["revision_id"] == 85, "the export said which version it was and nobody wrote it down"
     assert (tmp_path / "docs/tok1/content.md").read_text() == "# 方案"
+
+
+def test_a_note_a_minute_names_is_still_found_after_the_merge(tmp_path, monkeypatch):
+    """Folding `minutes/<t>/detail.yaml` into `meta.yaml` left the note walk reading a glob
+    for a file that no longer exists, so every `note_id` reachable only through a minute
+    stopped being discovered -- silently, because meetings name most of the same notes."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        asked.append(argv[argv.index("--note-id") + 1])
+        return {"note": {"note_id": asked[-1]}}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("minutes/obc1/meta.yaml", {"token": "obc1", "note_id": "7628812844414880954"})
+    store.write_yaml("minutes/obc2/meta.yaml", {"token": "obc2", "note_id": ""})  # the raw endpoint answers with an empty string when there is no note
+
+    run(sync_module._resolve_notes(store, Progress()))  # noqa: SLF001
+
+    assert asked == ["7628812844414880954"], f"a note only a minute names was never resolved: {asked}"

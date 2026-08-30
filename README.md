@@ -137,7 +137,7 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
 - **discovery is not only search.** A ranked slice misses what nobody searched for, so
   every reference the mirror already holds is followed: documents linked in messages and in
   other documents' bodies (417 and 495 that no search returned), bitables named by the doc
-  corpus (167 of 178), the minute a meeting's `detail.yaml` points at (191 of 710), and the
+  corpus (167 of 178), the minute a meeting's record points at (191 of 710), and the
   documents a meeting note turns out to be made of. All of it is read off disk, so finding
   them costs nothing — only fetching does.
 - **discovery passes have no incremental signal to offer at all** — a wiki node carries no
