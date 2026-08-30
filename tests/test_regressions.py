@@ -4,6 +4,7 @@ from asyncio import Semaphore, create_task, gather, run, sleep
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
+from json import loads
 from os import utime
 
 import pytest
@@ -2531,3 +2532,33 @@ def test_an_id_search_does_not_know_is_not_asked_every_run(tmp_path, monkeypatch
     asked.clear()
     run(sync_module.sync_profiles(store, Progress()))
     assert asked == [3], f"the sweep that is due has to ask everyone: {asked}"
+
+
+def test_a_token_the_metas_batch_refused_is_asked_the_other_way(tmp_path, monkeypatch):
+    """A `/wiki/` link carries a node token for some documents and the document's own for
+    others, and nothing in the link says which -- so `doc_types: WIKI` is a guess. It is wrong
+    for 112 of this store's, which have a body we exported and no `update_time` at all, so
+    their bodies had stopped refreshing: asked as `wiki` they answer 970005, asked as `docx`
+    all four of a sample answered."""
+    from lark_fs import sync as sync_module
+
+    asked: list[list[str]] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            docs = loads(argv[argv.index("--data") + 1])["request_docs"]
+            asked.append([d["doc_type"] for d in docs])
+            if docs[0]["doc_type"] == "wiki":
+                return {"metas": [], "failed_list": [{"code": 970005, "token": docs[0]["doc_token"]}]}
+            return {"metas": [{"doc_token": "tok1", "doc_type": "docx", "create_time": "1700000000", "latest_modify_time": "1700000001", "title": "方案", "url": "https://x/docx/tok1"}]}
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "doc_types": "WIKI"})
+    store.write("docs/tok1/content.md", "a body an earlier run exported")
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+
+    assert asked == [["wiki"], ["docx"]], f"the refusal was taken as the answer: {asked}"
+    assert store.read_yaml("docs/tok1/meta.yaml")["update_time"] == 1700000001, "a document whose body we can export still had no idea when it changed"

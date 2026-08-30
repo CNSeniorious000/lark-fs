@@ -898,12 +898,14 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # documents, 3360 had none and their bodies were frozen at whatever the run that first
     # found them exported. `metas batch_query` answers for 200 tokens at a time, whichever
     # pass found them, with the same number the search reports (checked on one holding both).
-    async def freshen(batch: list[tuple[str, str]]):
+    async def ask(batch: list[tuple[str, str]]) -> set[str]:
+        """Write down what came back, and return the tokens that did not."""
         payload = dumps({"request_docs": [{"doc_token": t, "doc_type": k} for t, k in batch], "with_url": True})
         try:
             metas = (await cli.run("drive", "metas", "batch_query", "--data", payload) or {}).get("metas") or []
         except cli.LarkError:
-            return  # a batch that does not answer is a batch of timestamps we already had
+            return set()  # a batch that does not answer is a batch of timestamps we already had
+        answered = set()
         for m in metas:
             token = ((m.get("request_doc_info") or {}).get("doc_token")) or m["doc_token"]
             # `latest_modify_time` is this store's `update_time` under another name, and the
@@ -919,8 +921,19 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             }
             if (own := m.get("doc_token")) and own != token:
                 row["obj_token"] = own  # a wiki token answers as the document it wraps, under the name the node lists use
+            answered.add(token)
             on_disk[token] = {**on_disk.get(token, {}), **row}
             store.write_yaml(f"docs/{token}/meta.yaml", on_disk[token])
+        return {t for t, _ in batch} - answered
+
+    async def freshen(batch: list[tuple[str, str]]):
+        # A `/wiki/` link carries a node token for some documents and the document's own for
+        # others, and nothing in the link says which -- so `doc_types: WIKI` is a guess, and it
+        # is wrong for 112 of them: asked as `wiki` they answer 970005, asked as `docx` all
+        # four of a sample answered. One retry settles it, the way 131005 does for comments.
+        # What is still missing after that is deleted or unshared, and `.nobody` says which.
+        if again := [(t, "docx") for t, k in batch if t in await ask(batch) and k != "docx"]:
+            await ask(again)
 
     asks = [(t, kind.lower()) for t, m in on_disk.items() if (kind := str(m.get("obj_type") or m.get("doc_types") or ""))]
     await cli.spread(freshen, [asks[i : i + META_BATCH] for i in range(0, len(asks), META_BATCH)])
