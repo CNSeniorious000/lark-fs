@@ -74,6 +74,19 @@ class Store:
         path.write_text(content)
         return True
 
+    def mark(self, rel: str, content: str = ""):
+        """Write a marker whose *mtime* is the datum -- "asked, and this is what came back".
+
+        `write` deliberately leaves an unchanged file alone, and a marker's content is the
+        one thing that does not change: a document nobody shared answers "forbidden" again,
+        a minute nobody shared answers nothing again. Written through `write`, the clock they
+        exist to hold would never advance, so the moment one crossed its window it became a
+        request on every single run, forever -- the exact cost the marker was added to stop.
+        """
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
     def write_yaml(self, rel: str, obj: Any) -> bool:
         return self.write(rel, readable_yaml_dumps(obj))
 

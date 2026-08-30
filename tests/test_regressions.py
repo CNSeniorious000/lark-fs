@@ -2460,3 +2460,40 @@ def test_a_body_that_did_not_change_is_not_exported_forever(tmp_path, monkeypatc
 
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert fetched == 1, "the same unchanged body was exported again on the next run, and would be forever"
+
+
+def test_a_clock_marker_advances_its_own_clock(tmp_path, monkeypatch):
+    """`write` deliberately leaves an unchanged file alone so mtimes stay meaningful, and a
+    marker's content is the one thing that never changes -- a document nobody shared answers
+    "forbidden" again, its comments come back identical again. Written that way the clock they
+    exist to hold never advanced, so the moment one crossed its window it became a request on
+    every single run: 433 of one run's 440 documents were that, and the next run's 433 too."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {}
+        asked.append(argv[1])
+        if argv[1] == "+fetch":
+            raise cli.LarkError(list(argv), {"error": {"code": 3380004, "message": "no permission"}})
+        return {"items": [{"comment_id": "c1"}]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "obj_type": "docx"})
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert asked == ["+fetch", "+list-comments"], f"the first run has to actually ask: {asked}"
+
+    stale = int(datetime.now(UTC).timestamp()) - int(sync_module.NOACCESS_HOURS * 3600) - 60
+    for name in (".nobody", "comments.yaml"):
+        utime(tmp_path / f"docs/tok1/{name}", (stale, stale))
+    asked.clear()
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert asked == ["+fetch", "+list-comments"], f"a marker past its window is asked again, once: {asked}"
+
+    asked.clear()
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert asked == [], f"the same answer came back and the clock did not restart: {asked}"

@@ -122,6 +122,11 @@ not one that only shows in a transient state:
   under the wrong `--type`. A marker that records only *that* it was written cannot be
   told apart from a permanent verdict, so 423 documents lost their comments and every
   sheet was re-fetched forever. Write the reason; read it back before trusting it.
+- A file whose *mtime* is the datum has to be written even when its bytes are identical --
+  that is what `Store.mark` is for, and why an unchanged `comments.yaml` is touched. A
+  marker's content is the one thing that never changes, so `Store.write`, which skips an
+  identical file to keep mtimes meaningful, freezes the very clock the marker exists to
+  hold: 433 of one run's 440 documents were re-asked for comments that had not moved.
 - A cursor must never outlive the work it stands for. It is committed per chat while the
   media rows it produced were still in memory, so an interrupt in between left a cursor
   past messages whose attachments were never indexed — and nothing walks those again.

@@ -958,7 +958,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 # content where it had none, and a bare marker outlasts it. Only "unsupported"
                 # is a permanent verdict; the marker records which of the two this was, and its
                 # own mtime is what an empty one is re-checked against.
-                store.write(f"docs/{token}/.nobody", verdict)
+                store.mark(f"docs/{token}/.nobody", verdict)
         if not _doc_wants_comments(store, token):
             return
         # asking as `docx` is what Drive recognises the token *as*, and anything that is not
@@ -987,15 +987,19 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 # endpoint cannot name; anything else may just be a rate limit, and marking
                 # that would lose the comments for good
                 if e.is_missing or e.is_unlistable_type:
-                    store.write(f"docs/{token}/.nocomments", "")
+                    store.mark(f"docs/{token}/.nocomments")
                 elif e.is_forbidden:
-                    store.write(f"docs/{token}/.nocomments", "forbidden")
+                    store.mark(f"docs/{token}/.nocomments", "forbidden")
                 return
         # The answer is the record, empty or not. Writing only a non-empty one left the
         # document indistinguishable from one never asked, and the retry was gated on the
         # *body* being stale -- so 258 documents whose bodies had settled were never going
         # to be asked again.
-        store.write_yaml(f"docs/{token}/comments.yaml", {"count": len(comments), "items": comments})
+        # this file's mtime is the clock, and comments usually come back identical -- so
+        # without the touch, the 403 documents that have any were asked on every run rather
+        # than daily. 433 of one run's 440 documents were exactly that.
+        if not store.write_yaml(f"docs/{token}/comments.yaml", {"count": len(comments), "items": comments}):
+            (store.root / f"docs/{token}/comments.yaml").touch()
 
     async def counted(token: str):
         # once per document and whatever it owed, not once per fetch: `todo` holds documents
@@ -1302,7 +1306,7 @@ async def sync_minutes(store: Store, p: Progress, *, since: str = "", full: bool
             base = await cli.run("minutes", "minutes", "get", "--minute-token", token)
         except cli.LarkError as e:
             if e.is_forbidden:
-                store.write(f"minutes/{token}/.noaccess", "")  # not permanent -- access can be granted, so the marker's mtime is when to look again
+                store.mark(f"minutes/{token}/.noaccess")  # not permanent -- access can be granted, so the marker's mtime is when to look again
             return
         finally:
             p.bump("minutes", last=cli.summarise_title((found.get(token) or {}).get("display_info")))
