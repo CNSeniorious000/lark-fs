@@ -1030,7 +1030,6 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         for retried in (False, True):
             try:
                 comments = [c async for c in cli.paginate("drive", "+list-comments", "--token", token, "--type", kind, "--solved-status", "all", key="items")]
-                break
             except cli.LarkError as e:
                 # 131005 is Drive saying this token is real and is not a wiki node, so the
                 # `/wiki/` link that named it carried the document's own token rather than
@@ -1050,15 +1049,19 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 elif e.is_forbidden:
                     store.mark(f"docs/{token}/.nocomments", "forbidden")
                 return
-        # The answer is the record, empty or not. Writing only a non-empty one left the
-        # document indistinguishable from one never asked, and the retry was gated on the
-        # *body* being stale -- so 258 documents whose bodies had settled were never going
-        # to be asked again.
-        # this file's mtime is the clock, and comments usually come back identical -- so
-        # without the touch, the 403 documents that have any were asked on every run rather
-        # than daily. 433 of one run's 440 documents were exactly that.
-        if not store.write_yaml(f"docs/{token}/comments.yaml", {"count": len(comments), "items": comments}):
-            (store.root / f"docs/{token}/comments.yaml").touch()
+            # Written here rather than after the loop, where `comments` is only bound because
+            # the one branch that continues is the one that cannot be reached twice -- true,
+            # and not something a reader or a type checker should have to prove.
+            #
+            # The answer is the record, empty or not. Writing only a non-empty one left the
+            # document indistinguishable from one never asked, and the retry was gated on the
+            # *body* being stale -- so 258 documents whose bodies had settled were never going
+            # to be asked again. This file's mtime is the clock, and comments usually come back
+            # identical -- so without the touch, the 403 documents that have any were asked on
+            # every run rather than daily. 433 of one run's 440 documents were exactly that.
+            if not store.write_yaml(f"docs/{token}/comments.yaml", {"count": len(comments), "items": comments}):
+                (store.root / f"docs/{token}/comments.yaml").touch()
+            return
 
     async def counted(token: str):
         # once per document and whatever it owed, not once per fetch: `todo` holds documents
