@@ -659,7 +659,12 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
 
 # Everything a roster carries about a person beyond their id. `localized_name` is the one
 # that matters: it holds the parenthesised alias that tells two same-named colleagues apart.
-PROFILE_FIELDS = ("localized_name", "enterprise_email", "email", "department", "p2p_chat_id", "is_activated")
+# The last two say things no other endpoint does: whether this person belongs to another
+# tenant, and whether the account we are logged in as has ever talked to them. Of the eleven
+# keys a row carries, the three left out are not facts about the person -- `open_id` is the
+# directory's own name, `match_segments` describes the query, and `chat_recency_hint` renders
+# the current moment ("Contacted today"), so it is false tomorrow and rewrites every file.
+PROFILE_FIELDS = ("localized_name", "enterprise_email", "email", "department", "p2p_chat_id", "is_activated", "is_cross_tenant", "has_chatted")
 BATCH = 19  # one under the 20-match cap `+search-user` enforces, measured against resolvable ids
 
 

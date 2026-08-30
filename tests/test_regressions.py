@@ -412,16 +412,23 @@ def test_every_codepoint_round_trips():
 
 
 def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
-    """`+search-user` answers with more than a profile: `chat_recency_hint` is relative to
-    now ("Contacted today") and `match_segments` echoes the query, so merging the row
-    wholesale rewrites meta.yaml on every sync and buries the roster's own `name`."""
+    """Three of the eleven keys a row carries are not facts about the person: `open_id` is the
+    directory's own name, `match_segments` echoes the query, and `chat_recency_hint` renders
+    the current moment ("Contacted today"), so keeping it rewrites every user file on every
+    sync to say the same thing about a different day. The other eight land, `has_chatted` and
+    `is_cross_tenant` among them -- nothing else reports either -- without burying the
+    roster's own `name`, which is the richer one."""
     from lark_fs import sync as sync_module
 
     async def fake_run(*argv, **_):
         if argv[1] == "+get-user":
             return {"user": {"tenant_key": "T"}}
         ids = argv[argv.index("--user-ids") + 1].split(",")
-        return {"users": [{"open_id": i, "name": "", "localized_name": "Mia(张亚)", "chat_recency_hint": "Contacted today", "match_segments": [], "has_chatted": True} for i in ids]}
+        return {
+            "users": [
+                {"open_id": i, "name": "", "localized_name": "Mia(张亚)", "chat_recency_hint": "Contacted today", "match_segments": [], "has_chatted": True, "is_cross_tenant": True} for i in ids
+            ]
+        }
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -432,7 +439,8 @@ def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
     got = store.read_yaml("users/ou_1/meta.yaml")
     assert got["localized_name"] == "Mia(张亚)", "the alias that disambiguates same-named people was not taken"
     assert got["name"] == "张亚" and got["member_id"] == "ou_1", f"the roster's own fields were overwritten: {got}"
-    assert not {"chat_recency_hint", "match_segments", "has_chatted"} & got.keys(), f"volatile fields landed on disk: {got}"
+    assert got["has_chatted"] is True and got["is_cross_tenant"] is True, f"two facts nothing else reports were dropped: {got}"
+    assert not {"chat_recency_hint", "match_segments"} & got.keys(), f"a rendering of now landed on disk: {got}"
 
 
 def test_a_discovery_pass_coasts_but_an_explicit_request_never_does(tmp_path):
