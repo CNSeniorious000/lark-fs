@@ -2584,3 +2584,38 @@ def test_status_does_not_count_a_thread_s_metadata_as_a_message(tmp_path, monkey
 
     line = next(line for line in out.getvalue().splitlines() if "messages" in line)
     assert line.split()[-1] == "2", f"the thread's own metadata was counted as a message: {line!r}"
+
+
+def test_the_node_list_already_knows_when_a_document_changed(tmp_path, monkeypatch):
+    """`wiki +node-list` emits eight of the sixteen fields a node carries, and one it drops is
+    `obj_edit_time` -- the same number `metas` returns as `latest_modify_time` (1788090031
+    both ways on a real node). It is the only freshness signal for a document `metas` will not
+    answer for at all, which four on this store are: every doc_type comes back 970005 while
+    `docs +fetch` exports them fine."""
+    from lark_fs import sync as sync_module
+
+    urls: list[str] = []
+
+    async def fake_run(*argv, **_):
+        urls.append(argv[2] if argv[0] == "api" else argv[1])
+        if argv[0] == "api" and "/nodes" in argv[2]:
+            return {"items": [{"node_token": "n1", "obj_token": "tok1", "obj_type": "docx", "title": "方案", "obj_edit_time": "1788090031", "url": "https://x/wiki/n1", "owner": "ou_kj"}]}
+        if argv[1] == "+space-list":
+            return {"spaces": [{"space_id": "s1", "name": "空间"}]}
+        return {}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    run(sync_module.sync_wiki(store, Progress()))
+
+    assert not any("+node-list" in u for u in urls), f"the shortcut that drops half the fields is still being used: {urls}"
+    assert store.read_yaml_rows("wiki/s1/nodes.yaml")[0]["obj_edit_time"] == "1788090031", "the node list was written without the field it was fetched for"
+
+    async def no_search(*_a, **_k):
+        if False:
+            yield {}
+
+    monkeypatch.setattr(cli, "paginate", no_search)
+    monkeypatch.setattr(cli, "run", lambda *a, **k: fake_run(*a, **k))
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert store.read_yaml("docs/tok1/meta.yaml")["update_time"] == 1788090031, "the document still had no idea when it changed"

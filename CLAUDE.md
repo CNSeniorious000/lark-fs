@@ -60,7 +60,11 @@ Known traps, all hit in practice:
 - the message shortcuts enrich a page with `POST /im/v1/messages/reactions/batch_query`,
   one request per 20 messages, unless `--no-reactions` is passed. The walk and the two repair
   paths pay it; `recheck` does not, because it re-reads 3000 already-known messages a run.
-- `wiki +node-list` returns one level; recurse via `has_child` + `--parent-node-token`.
+- the wiki node walk goes to the raw `GET /wiki/v2/spaces/{id}/nodes`, not `+node-list`:
+  the shortcut emits 8 of the 16 fields a node carries, and one it drops is `obj_edit_time` --
+  the same number `metas` calls `latest_modify_time`, and the only freshness signal for a
+  document `metas` will not answer for at all. Returns one level; recurse via `has_child` +
+  `parent_node_token`. Paging it by hand also removes `--page-all`'s ten-page ceiling.
 - `minutes +detail` is `minutes.get` + `GET /minutes/v1/minutes/{t}/artifacts` (its
   `--dry-run` prints both) and emits three of the first's eight fields, renames the second's
   and drops `keywords`. It is also the reason `--transcript` needed `cwd` set to the store

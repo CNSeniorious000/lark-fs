@@ -880,7 +880,20 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             # search row -- owner, url, and the `update_time` that decides whether its body is
             # re-exported -- overwritten by these five keys. 2289 of 4140 documents on this
             # store were in that state, which is to say their bodies had stopped refreshing.
-            known = {"token": token, "title": node.get("title", ""), "obj_type": node.get("obj_type"), "wiki_node_token": node.get("node_token", ""), "space_id": node.get("space_id", "")}
+            known = {
+                "token": token,
+                "title": node.get("title", ""),
+                "obj_type": node.get("obj_type"),
+                "wiki_node_token": node.get("node_token", ""),
+                "space_id": node.get("space_id", ""),
+            }
+            # the node already knows when the document it points at last changed, and it is the
+            # same number `metas` answers with -- so a document `metas` will not answer for at
+            # all still gets the one signal that says whether its body needs exporting again
+            if edit := node.get("obj_edit_time"):
+                known["update_time"] = int(edit)
+            if url := node.get("url"):
+                known["url"] = url  # only when it has one: writing "" here would erase the url a search hit knew
             seen[token] = {**store.read_yaml(f"docs/{token}/meta.yaml"), **known}
             store.write_yaml(f"docs/{token}/meta.yaml", seen[token])
             p.bump("docs", last=cli.oneline(node.get("title")))
@@ -1619,14 +1632,25 @@ async def sync_wiki(store: Store, p: Progress):
 
         The distinction matters: a leaf and a rate-limited branch both have no nodes to
         return, and conflating them lets a failure look like an answer.
+
+        The raw endpoint, not `+node-list`: the shortcut emits eight of the sixteen fields a
+        node carries, and one it drops is `obj_edit_time` -- the only thing that says when the
+        document a node points at last changed, and the same number `metas` calls
+        `latest_modify_time` (checked on one node: 1788090031 both ways). `creator`, `owner`,
+        `url`, the create times and the `origin_*` pair that says what a shortcut node points
+        at go the same way. Paging it by hand also drops `--page-all`'s ten-page ceiling.
         """
-        # `--page-limit 0` for the reason given at the roster call: ten pages is the default
-        # ceiling, and no space or level is near it today, but a silent one is worth removing
-        argv = ["wiki", "+node-list", "--space-id", sid, "--page-all", "--page-limit", "0", *(["--parent-node-token", parent] if parent else [])]
-        try:
-            return ((await cli.run(*argv)) or {}).get("nodes") or []
-        except cli.LarkError:
-            return None
+        found: list[dict] = []
+        token = ""
+        while True:
+            params = {"page_size": 50, **({"parent_node_token": parent} if parent else {}), **({"page_token": token} if token else {})}
+            try:
+                data = await cli.run("api", "GET", f"/open-apis/wiki/v2/spaces/{sid}/nodes", "--params", dumps(params)) or {}
+            except cli.LarkError:
+                return None
+            found += data.get("items") or []
+            if not (data.get("has_more") and (token := data.get("page_token") or "")):
+                return found
 
     async def walk(sid: str) -> tuple[list[dict], bool]:
         """Wiki nodes form a tree and `+node-list` returns one level at a time.
