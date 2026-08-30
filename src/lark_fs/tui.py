@@ -257,7 +257,10 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
 def print_summary(store):
     counts = {
         "chats": store.count("chats/*"),
-        "messages": store.count("chats/*/messages/*/*.yaml") + store.count("chats/*/threads/*/*.yaml"),
+        # a thread's directory also holds its own meta.yaml, which is not a message: the root
+        # keeps its own <message_id>.yaml like every other one. 13576 of them on this store,
+        # which is what made `status` report 466543 messages where there are 452967.
+        "messages": store.count("chats/*/messages/*/*.yaml") + store.count("chats/*/threads/*/*.yaml") - store.count("chats/*/threads/*/meta.yaml"),
         "users": store.count("users/*"),
         "docs": store.count("docs/*"),
         "minutes": store.count("minutes/*"),

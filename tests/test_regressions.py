@@ -3,6 +3,7 @@
 from asyncio import Semaphore, create_task, gather, run, sleep
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from itertools import pairwise
 from json import loads
 from os import utime
@@ -2562,3 +2563,24 @@ def test_a_token_the_metas_batch_refused_is_asked_the_other_way(tmp_path, monkey
 
     assert asked == [["wiki"], ["docx"]], f"the refusal was taken as the answer: {asked}"
     assert store.read_yaml("docs/tok1/meta.yaml")["update_time"] == 1700000001, "a document whose body we can export still had no idea when it changed"
+
+
+def test_status_does_not_count_a_thread_s_metadata_as_a_message(tmp_path, monkeypatch):
+    """A thread's directory holds its own `meta.yaml` alongside the replies, and the root
+    message keeps its own `<message_id>.yaml` like every other one -- so that file is not a
+    message. Counting the whole directory made `status` report 466543 where there were
+    452967, 13576 too many."""
+    from lark_fs import tui
+
+    store = Store(tmp_path)
+    store.write_yaml("chats/oc_1/messages/2026-08/om_1.yaml", {"message_id": "om_1"})
+    store.write_yaml("chats/oc_1/threads/omt_1/meta.yaml", {"thread_id": "omt_1", "replies": 1})
+    store.write_yaml("chats/oc_1/threads/omt_1/om_2.yaml", {"message_id": "om_2"})
+
+    # `tui` binds `stderr` at import, so under pytest that binding belongs to whichever test
+    # imported it first -- capsys sees nothing here when the suite runs in order
+    monkeypatch.setattr(tui, "stderr", out := StringIO())
+    tui.print_summary(store)
+
+    line = next(line for line in out.getvalue().splitlines() if "messages" in line)
+    assert line.split()[-1] == "2", f"the thread's own metadata was counted as a message: {line!r}"
