@@ -2656,3 +2656,27 @@ def test_a_document_no_listing_can_reach_is_asked_by_name(tmp_path, monkeypatch)
     row = store.read_yaml("docs/tok1/meta.yaml")
     assert row["update_time"] == 1780054979, "the one endpoint that knows was never asked"
     assert row["obj_token"] == "V3OS", "and the token it resolves to is worth keeping"
+
+
+def test_a_refused_lookup_is_not_recorded_as_an_answer(tmp_path, monkeypatch):
+    """The strand pass runs at the tail of a long one, so a rate limit is the likeliest thing
+    it meets -- and it wrote the same permanent-ish marker as a real refusal. All four of the
+    first run's markers were that: tokens `get_node` answers for perfectly well from a cold
+    shell. A marker may only mean "it answered, and had nothing"."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[0] == "api" and "get_node" in argv[2]:
+            raise cli.LarkError(list(argv), {"error": {"code": 99991400, "message": "rate limit"}})
+        if argv[1] == "metas":
+            return {}
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "doc_types": "WIKI"})
+    store.write("docs/tok1/content.md", "a body")
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+
+    assert not store.exists("docs/tok1/.notimestamp"), "a request that never got an answer was recorded as one"

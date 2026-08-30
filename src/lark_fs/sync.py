@@ -964,7 +964,9 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         try:
             node = ((await cli.run("api", "GET", "/open-apis/wiki/v2/spaces/get_node", "--params", dumps({"token": token}))) or {}).get("node") or {}
         except cli.LarkError:
-            node = {}
+            return  # transient: leave it due. This pass runs at the tail of a long one, and a
+            # rate limit here wrote the same marker as a real refusal -- all four of the first
+            # run's, on tokens this endpoint answers for perfectly well from a cold shell.
         if not (edit := node.get("obj_edit_time")):
             store.mark(f"docs/{token}/.notimestamp")  # nothing here will ever say when it changed; wait out the same clock a locked body does
             return
