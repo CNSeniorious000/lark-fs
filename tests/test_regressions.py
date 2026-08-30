@@ -2611,6 +2611,8 @@ def test_the_node_list_already_knows_when_a_document_changed(tmp_path, monkeypat
     assert not any("+node-list" in u for u in urls), f"the shortcut that drops half the fields is still being used: {urls}"
     assert store.read_yaml_rows("wiki/s1/nodes.yaml")[0]["obj_edit_time"] == "1788090031", "the node list was written without the field it was fetched for"
 
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "url": "https://x/docx/tok1"})  # what a metas answer left here
+
     async def no_search(*_a, **_k):
         if False:
             yield {}
@@ -2618,7 +2620,9 @@ def test_the_node_list_already_knows_when_a_document_changed(tmp_path, monkeypat
     monkeypatch.setattr(cli, "paginate", no_search)
     monkeypatch.setattr(cli, "run", lambda *a, **k: fake_run(*a, **k))
     run(sync_module.sync_docs(store, Progress(), search=False))
-    assert store.read_yaml("docs/tok1/meta.yaml")["update_time"] == 1788090031, "the document still had no idea when it changed"
+    row = store.read_yaml("docs/tok1/meta.yaml")
+    assert row["update_time"] == 1788090031, "the document still had no idea when it changed"
+    assert row["url"] == "https://x/docx/tok1" and row["wiki_url"] == "https://x/wiki/n1", f"the two addresses fought over one key: {row}"
 
 
 def test_a_document_no_listing_can_reach_is_asked_by_name(tmp_path, monkeypatch):

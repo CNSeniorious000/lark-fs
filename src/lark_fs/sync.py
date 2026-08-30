@@ -892,8 +892,11 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             # all still gets the one signal that says whether its body needs exporting again
             if edit := node.get("obj_edit_time"):
                 known["update_time"] = int(edit)
+            # under its own name: `url` belongs to whoever resolved the document itself, and a
+            # `/wiki/` link and a `/docx/` link are two real addresses of it. Sharing the key
+            # made the two writers flip 1676 files back and forth on every run.
             if url := node.get("url"):
-                known["url"] = url  # only when it has one: writing "" here would erase the url a search hit knew
+                known["wiki_url"] = url
             seen[token] = {**store.read_yaml(f"docs/{token}/meta.yaml"), **known}
             store.write_yaml(f"docs/{token}/meta.yaml", seen[token])
             p.bump("docs", last=cli.oneline(node.get("title")))
