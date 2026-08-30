@@ -2266,3 +2266,56 @@ def test_the_only_text_a_search_hit_carries_is_kept(tmp_path, monkeypatch):
     row = store.read_yaml("docs/tok1/meta.yaml")
     assert row["summary"] == "2.5 关键设计决策", f"the only text this document will ever have was dropped: {row.get('summary')!r}"
     assert not store.exists("docs/tok1/content.md"), "the fixture is only honest if this really is a document with no body"
+
+
+def test_a_table_keeps_the_schema_its_records_arrived_with(tmp_path, monkeypatch):
+    """A +record-list response describes the table as well as the page, and only the page was
+    read. Column names alone are not a schema: the ids survive a rename, the types say how to
+    read a cell, and `timezone` is what a date is relative to -- none of it is anywhere else in
+    a response we were already paying for. The 584 tables already pulled are asked for a single
+    row, since any page's header carries it."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+    page = {
+        "fields": ["用例序号", "具体内容"],
+        "field_id_list": ["fldA", "fldB"],
+        "field_type_list": ["text", "text"],
+        "rev": 7,
+        "timezone": "Asia/Singapore",
+        "query_context": {"record_scope": "all_records"},
+        "data": [["1", "x"]],
+        "record_id_list": ["rec_1"],
+    }
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+table-list":
+            return {"tables": [{"id": "tbl_1", "name": "用例"}]}
+        asked.append(argv[argv.index("--limit") + 1])
+        return page
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"result_meta": {"token": "bas_1", "doc_types": "BITABLE"}}]))
+    store = Store(tmp_path)
+
+    run(sync_module.sync_bases(store, Progress()))
+
+    row = store.read_yaml("bases/bas_1/tables/tbl_1/meta.yaml")
+    assert row["columns"] == [{"name": "用例序号", "id": "fldA", "type": "text"}, {"name": "具体内容", "id": "fldB", "type": "text"}], f"the table's own shape was thrown away: {row}"
+    assert row["rev"] == 7 and row["timezone"] == "Asia/Singapore", f"the revision and the timezone a date is read against were dropped: {row}"
+    assert row["name"] == "用例", "the table list's own row is still there"
+    assert "query_context" not in row, "the request echoed back is not information about the table"
+    assert asked == ["200"], f"the first pull is the whole table: {asked}"
+
+    # a store that already has the records and not the schema pays one row, not the table again
+    store.write_yaml("bases/bas_1/tables/tbl_1/meta.yaml", {"id": "tbl_1", "name": "用例"})
+    store.cursors.pop("swept")  # the daily clock is what decides *whether* to look; this is about what it costs when it does
+    asked.clear()
+    run(sync_module.sync_bases(store, Progress()))
+    assert asked == ["1"], f"a table whose records are already down was pulled again in full: {asked}"
+    assert store.read_yaml("bases/bas_1/tables/tbl_1/meta.yaml")["rev"] == 7
+
+    store.cursors.pop("swept")
+    asked.clear()
+    run(sync_module.sync_bases(store, Progress()))
+    assert asked == [], f"a table with both was asked for anyway: {asked}"

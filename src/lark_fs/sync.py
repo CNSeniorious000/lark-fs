@@ -1155,6 +1155,19 @@ def _rows(payload: dict) -> list[dict]:
     return [{"record_id": rid, **dict(zip(fields, row, strict=False))} for rid, row in zip(ids, data, strict=False)]
 
 
+def _schema(payload: dict) -> dict:
+    """The half of a +record-list response that describes the table rather than the page.
+
+    Column names alone are not a schema: `field_id_list` is the id that survives a rename,
+    `field_type_list` says how to read a cell, and `timezone` is what a date cell is relative
+    to. `rev` is the table's revision -- the only thing that will ever say a pull has gone out
+    of date. Of the nine keys a response carries, the two left out are the request coming back:
+    `query_context` echoes the scope asked for, and `has_more` is consumed by the walk itself.
+    """
+    cols = zip(payload.get("fields") or [], payload.get("field_id_list") or [], payload.get("field_type_list") or [], strict=False)
+    return {"columns": [{"name": n, "id": i, "type": t} for n, i, t in cols], "rev": payload.get("rev"), "timezone": payload.get("timezone")}
+
+
 def _clean(value) -> Any:
     """Lark's search endpoints return HTML-entity-escaped text with <h> hit markers.
     Left as-is those become `&lt;b&gt;` on disk, which breaks plain-text grep."""
@@ -1498,26 +1511,34 @@ async def sync_bases(store: Store, p: Progress):
             return
         for t in (tables or {}).get("tables") or []:
             tid = t.get("id")
-            store.write_yaml(f"bases/{app_token}/tables/{tid}/meta.yaml", t)
+            head = f"bases/{app_token}/tables/{tid}/meta.yaml"
+            store.write_yaml(head, {**store.read_yaml(head), **t})
             rel = f"bases/{app_token}/tables/{tid}/records.yaml"
-            if store.exists(rel):
-                continue  # records are re-pulled only on demand; full-table diffing is a later concern
-            # +record-list is offset-based (not page-token) and defaults to a markdown table
+            pulled = store.exists(rel)  # records are re-pulled only on demand; full-table diffing is a later concern
+            if pulled and "columns" in store.read_yaml(head):
+                continue
+            # +record-list is offset-based (not page-token) and defaults to a markdown table.
+            # A table whose records are already down is asked for one row, because the header
+            # of any page carries the schema and that is the only thing still missing.
             rows: list[dict] = []
             whole = True
             while True:
                 try:
-                    recs = await cli.run("base", "+record-list", "--base-token", app_token, "--table-id", tid, "--limit", "200", "--offset", str(len(rows)))
+                    recs = await cli.run("base", "+record-list", "--base-token", app_token, "--table-id", tid, "--limit", "1" if pulled else "200", "--offset", str(len(rows))) or {}
                 except cli.LarkError:
                     whole = False
                     break
-                rows += _rows(recs or {})
-                if not (recs or {}).get("has_more"):
+                if not rows:
+                    store.write_yaml(head, {**store.read_yaml(head), **_schema(recs)})
+                    if pulled:
+                        break
+                rows += _rows(recs)
+                if not recs.get("has_more"):
                     break
             # A half table written here is permanent -- `store.exists(rel)` above skips the
             # file forever after, so one rate-limited page in the middle freezes the first
             # 400 rows in place as if they were the whole thing.
-            if whole:
+            if whole and not pulled:
                 store.write_yaml(rel, _clean(rows))
         p.bump("bases")
 
