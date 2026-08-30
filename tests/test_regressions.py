@@ -2497,3 +2497,37 @@ def test_a_clock_marker_advances_its_own_clock(tmp_path, monkeypatch):
     asked.clear()
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert asked == [], f"the same answer came back and the clock did not restart: {asked}"
+
+
+def test_an_id_search_does_not_know_is_not_asked_every_run(tmp_path, monkeypatch):
+    """A user with no `localized_name` is asked about between sweeps, so someone met mid-week
+    is resolved that run rather than the next. But 89 of this store's are deactivated accounts
+    and bots that resolve to nothing and always will, and nothing on disk said they had been
+    asked -- five requests on every single run, reporting `0/89 resolved` each time."""
+    from lark_fs import sync as sync_module
+
+    asked: list[int] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+get-user":
+            return {"user": {"open_id": "ou_me", "tenant_key": "T"}}
+        asked.append(len(argv[argv.index("--user-ids") + 1].split(",")))
+        return {"users": [{"open_id": "ou_real", "localized_name": "Mia(张亚)"}]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    for oid in ("ou_real", "ou_bot"):
+        store.write_yaml(f"users/{oid}/meta.yaml", {"open_id": oid, "tenant_key": "T"})
+
+    run(sync_module.sync_profiles(store, Progress()))  # three: the account we run as gets a file of its own
+    assert asked == [3], f"the first pass has to ask about all of them: {asked}"
+    assert store.exists("users/ou_bot/.unresolved"), "nothing recorded that the id had been asked"
+
+    asked.clear()
+    run(sync_module.sync_profiles(store, Progress()))
+    assert asked == [], f"an id search has already refused was asked again the same day: {asked}"
+
+    store.cursors.pop("swept", None)  # the weekly sweep asks everyone regardless -- the marker only gates the days in between
+    asked.clear()
+    run(sync_module.sync_profiles(store, Progress()))
+    assert asked == [3], f"the sweep that is due has to ask everyone: {asked}"

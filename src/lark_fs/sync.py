@@ -705,7 +705,12 @@ async def sync_profiles(store: Store, p: Progress):
     # a resolved profile is not a permanent one: an email, a department and an activation
     # state all change, and "localized_name is present" was reading as "done for good"
     stale = not swept_recently(store, "profiles", PROFILE_HOURS)
-    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and (stale or "localized_name" not in u)]
+    # "no localized_name" is what makes a user asked about between sweeps, so someone met
+    # mid-week is resolved that run rather than the next. But 89 of them are deactivated
+    # accounts and bots that resolve to nothing and always will, and with nothing on disk
+    # saying they had been asked they were five requests on every single run. The marker is
+    # only consulted here: a sweep that is due asks everyone regardless.
+    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and (stale or ("localized_name" not in u and not store.exists(f"users/{oid}/.unresolved")))]
     p.set("profiles", total=len(todo), note=f"{len(on_disk)} known")
     if not todo:
         p.set("profiles", state="done", note="up to date")
@@ -726,6 +731,8 @@ async def sync_profiles(store: Store, p: Progress):
             rel = f"users/{row['open_id']}/meta.yaml"
             # a roster row is the richer one for name/member_id; only the profile-only fields are taken
             store.write_yaml(rel, _clean({**store.read_yaml(rel), **{k: row[k] for k in PROFILE_FIELDS if k in row}}))
+        for oid in set(batch) - {r["open_id"] for r in rows}:
+            store.mark(f"users/{oid}/.unresolved")  # asked, and this id is not one search knows
         resolved += len(rows)
         p.bump("profiles", len(batch))
 
