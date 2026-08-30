@@ -946,7 +946,12 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 store.write_yaml(rel, {**store.read_yaml(rel), "revision_id": rev})
             content = document.get("content")
             if content:
-                store.write(f"docs/{token}/content.md", content)
+                # `store.write` leaves the mtime alone when the text is identical, and that
+                # mtime is what says whether the copy is current -- so a document whose
+                # `update_time` moved without its text changing is exported again on every
+                # single run, forever. One on this store was already in that state.
+                if not store.write(f"docs/{token}/content.md", content):
+                    (store.root / f"docs/{token}/content.md").touch()
                 found.extend(_doc_links(content))  # documents point at documents, and 495 of those were nowhere else
             else:
                 # An empty body now is not an empty body forever: a docx written later has

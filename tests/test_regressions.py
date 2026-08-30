@@ -2428,3 +2428,35 @@ def test_a_note_a_minute_names_is_still_found_after_the_merge(tmp_path, monkeypa
     run(sync_module._resolve_notes(store, Progress()))  # noqa: SLF001
 
     assert asked == ["7628812844414880954"], f"a note only a minute names was never resolved: {asked}"
+
+
+def test_a_body_that_did_not_change_is_not_exported_forever(tmp_path, monkeypatch):
+    """`store.write` keeps mtimes meaningful by not touching a file whose text is identical,
+    and `content.md`'s mtime is what says whether the copy is current. So a document the
+    server stamped as changed, whose markdown came back byte-identical, stayed due on every
+    run -- one request a sync with nothing to show for it, forever."""
+    from lark_fs import sync as sync_module
+
+    fetched = 0
+
+    async def fake_run(*argv, **_):
+        nonlocal fetched
+        if argv[1] == "metas":
+            return {}
+        if argv[1] == "+fetch":
+            fetched += 1
+            return {"document": {"content": "# 方案"}}
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write("docs/tok1/content.md", "# 方案")
+    yesterday = int(datetime.now(UTC).timestamp()) - 86400
+    utime(tmp_path / "docs/tok1/content.md", (yesterday, yesterday))  # exported yesterday
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "obj_type": "docx", "update_time": yesterday + 3600})  # and edited an hour after that
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert fetched == 1, "the server said it changed and nobody looked"
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+    assert fetched == 1, "the same unchanged body was exported again on the next run, and would be forever"
