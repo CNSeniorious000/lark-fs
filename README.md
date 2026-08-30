@@ -197,7 +197,7 @@ disk, so the restarted run resumes from the cursors.
 ```sh
 uv run ruff check . && uv run ruff format .
 uv run pytest          # regressions for the failures that were silent
-pyright
+bunx basedpyright   # what CI runs; it reads the [tool.pyright] table in pyproject.toml
 ```
 
 `CLAUDE.md` is the field guide: `lark-cli`'s per-endpoint pagination caps, which

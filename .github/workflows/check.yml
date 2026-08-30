@@ -16,6 +16,9 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -q
-      # not a project dependency on purpose -- it ships a node runtime. The [nodejs]
-      # extra bundles one, so the check does not depend on what the runner happens to have.
-      - run: uvx --from "pyright[nodejs]" pyright
+      # basedpyright rather than pyright, and through bun rather than as a project
+      # dependency: it is a node package, so npm is where it actually lives, and pulling it
+      # from PyPI only to get a bundled node runtime with it was the long way round. The
+      # config it reads is still `[tool.pyright]` in pyproject.toml.
+      - uses: oven-sh/setup-bun@v2.2.0
+      - run: bunx basedpyright
