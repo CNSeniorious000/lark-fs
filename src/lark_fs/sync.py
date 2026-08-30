@@ -814,6 +814,12 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 if token in seen:
                     continue
                 title = _clean(r.get("title_highlighted"))
+                # The one thing in a hit that is not in `result_meta`, and for the 438
+                # documents that export no body -- sheets, bitables, mindnotes, the ones
+                # nobody shared -- it is the only text of their contents this mirror will
+                # ever hold. Query-bound, so a later query's snippet replaces it; `<b>` and
+                # `<hb>` are the endpoint's own emphasis markers and are not part of the text.
+                summary = cli.unescape_entities(cli.RE_MARKUP.sub("", r.get("summary_highlighted") or ""))
                 _note_tenant(meta.get("url", ""))
                 # `kind` has to survive to disk: 260 documents are addressable only as `wiki`,
                 # and a later run that meets one through the directory instead of a search hit
@@ -821,7 +827,15 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 # comments -- the first one tried this way had four. The row is merged over
                 # what is already there for the same reason the wiki pass merges: the two
                 # discovery routes describe the same document and know different things.
-                seen[token] = {**store.read_yaml(f"docs/{token}/meta.yaml"), **meta, "token": token, "entity_type": r.get("entity_type"), "title": title, **({"comment_type": kind} if kind else {})}
+                seen[token] = {
+                    **store.read_yaml(f"docs/{token}/meta.yaml"),
+                    **meta,
+                    "token": token,
+                    "entity_type": r.get("entity_type"),
+                    "title": title,
+                    **({"summary": summary} if summary else {}),
+                    **({"comment_type": kind} if kind else {}),
+                }
                 store.write_yaml(f"docs/{token}/meta.yaml", seen[token])
                 p.bump("docs", last=cli.oneline(title))
         except cli.LarkError:

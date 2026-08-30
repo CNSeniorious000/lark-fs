@@ -2227,3 +2227,34 @@ def test_a_document_no_query_ranked_still_learns_when_it_changed(tmp_path, monke
     assert row["owner_id"] == "ou_kj" and row["url"] == "https://x/docx/tok1", "the rest of what the batch answered is not derivable from anywhere else"
     assert (tmp_path / "docs/tok1/content.md").read_text() == "a newer body", "the timestamp moved and the body was not exported again"
     assert store.read_yaml("docs/nodetok/meta.yaml")["obj_token"] == "objtok", "a wiki token answers as the document it wraps, and that token is worth keeping"
+
+
+def test_the_only_text_a_search_hit_carries_is_kept(tmp_path, monkeypatch):
+    """`summary_highlighted` is the one field of a hit that `result_meta` does not repeat, and
+    it was thrown away. 438 documents on this store export no body at all -- sheets, bitables,
+    a mindnote, the ones nobody shared -- so for those it is the only text of their contents
+    the mirror will ever hold. The emphasis markers are the endpoint's, not the document's."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {}
+        if argv[1] == "+fetch":
+            raise cli.LarkError(list(argv), {"error": {"code": 3380002, "message": "Unsupported document type 'sheet'."}})
+        return {"items": []}
+
+    hit = {
+        "entity_type": "DOC",
+        "title_highlighted": "排期<h>表</h>",
+        "summary_highlighted": "<b>2.5 关键</b><hb>设计</hb><b>决策</b>",
+        "result_meta": {"token": "tok1", "doc_types": "SHEET", "url": "https://x/sheets/tok1"},
+    }
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([hit]))
+    store = Store(tmp_path)
+
+    run(sync_module.sync_docs(store, Progress(), queries=["设计"]))
+
+    row = store.read_yaml("docs/tok1/meta.yaml")
+    assert row["summary"] == "2.5 关键设计决策", f"the only text this document will ever have was dropped: {row.get('summary')!r}"
+    assert not store.exists("docs/tok1/content.md"), "the fixture is only honest if this really is a document with no body"
