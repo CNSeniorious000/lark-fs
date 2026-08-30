@@ -2372,3 +2372,26 @@ def test_the_account_we_run_as_is_a_person_the_store_already_has(tmp_path, monke
     row = store.read_yaml("users/ou_me/meta.yaml")
     assert row["union_id"] == "on_1" and row["employee_no"] == "42" and row["en_name"] == "Muspi", f"the answer was read for one field and thrown away: {row}"
     assert row["member_id"] == "ou_me", "the roster's own fields are still there"
+
+
+def test_the_export_records_which_revision_it_is(tmp_path, monkeypatch):
+    """`docs +fetch` answers with `revision_id` beside the content, and only the content was
+    read. `update_time` says when the server last changed; this says which version the file on
+    disk actually is, and nothing else in the mirror reports it."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {}
+        if argv[1] == "+fetch":
+            return {"document": {"document_id": "tok1", "revision_id": 85, "content": "# 方案"}}
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "obj_type": "docx"})
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+
+    assert store.read_yaml("docs/tok1/meta.yaml")["revision_id"] == 85, "the export said which version it was and nobody wrote it down"
+    assert (tmp_path / "docs/tok1/content.md").read_text() == "# 方案"

@@ -938,7 +938,13 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 if not (verdict := "unsupported" if e.is_unsupported_type else "deleted" if e.is_missing else "forbidden" if e.is_forbidden else ""):
                     return  # transient: leave it due, the next run retries it
                 data = None
-            content = ((data or {}).get("document") or {}).get("content")
+            document = (data or {}).get("document") or {}
+            # the export says which revision it is, and nothing else does: `update_time` says
+            # when the server last changed, this says which version is the file on disk
+            if rev := document.get("revision_id"):
+                rel = f"docs/{token}/meta.yaml"
+                store.write_yaml(rel, {**store.read_yaml(rel), "revision_id": rev})
+            content = document.get("content")
             if content:
                 store.write(f"docs/{token}/content.md", content)
                 found.extend(_doc_links(content))  # documents point at documents, and 495 of those were nowhere else
