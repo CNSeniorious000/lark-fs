@@ -950,6 +950,27 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
 
     asks = [(t, kind.lower()) for t, m in on_disk.items() if (kind := str(m.get("obj_type") or m.get("doc_types") or ""))]
     await cli.spread(freshen, [asks[i : i + META_BATCH] for i in range(0, len(asks), META_BATCH)])
+
+    # A few documents `docs +fetch` exports fine are unknown to `metas` under every doc_type,
+    # and unknown to the node walk too: `get_node` answers `space_id: null` for them, so their
+    # wiki node belongs to no space this account can enumerate. That endpoint still resolves
+    # them and answers with the same `obj_edit_time`, which is the last place to ask before a
+    # body that can be exported is frozen for good. Only for documents whose body we actually
+    # hold: everything else without a timestamp is deleted or unshared, and `.nobody` says so.
+    async def strand(token: str):
+        try:
+            node = ((await cli.run("api", "GET", "/open-apis/wiki/v2/spaces/get_node", "--params", dumps({"token": token}))) or {}).get("node") or {}
+        except cli.LarkError:
+            node = {}
+        if not (edit := node.get("obj_edit_time")):
+            store.mark(f"docs/{token}/.notimestamp")  # nothing here will ever say when it changed; wait out the same clock a locked body does
+            return
+        own = node.get("obj_token")
+        on_disk[token] = {**on_disk[token], "update_time": int(edit), **({"obj_token": own} if own and own != token else {})}
+        store.write_yaml(f"docs/{token}/meta.yaml", on_disk[token])
+
+    stranded = [t for t, m in on_disk.items() if "update_time" not in m and store.exists(f"docs/{t}/content.md") and _asks_again(store.root / f"docs/{t}/.notimestamp")]
+    await cli.spread(strand, stranded)
     seen.update(on_disk)
 
     # bodies are the expensive part: fetch one only if we have none, or if the server's
@@ -1053,6 +1074,11 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
 # remembers that as "has no comments" forever. `mindnote` is deliberately absent -- the
 # endpoint does not name it, and asking as `docx` instead is the closest thing available.
 DOC_TYPES = {"doc", "docx", "sheet", "file", "slides", "bitable", "base", "apps", "wiki"}
+
+
+def _asks_again(mark: Path) -> bool:
+    """A marker whose mtime is its clock has come round again -- or was never written."""
+    return not mark.exists() or datetime.now(UTC).timestamp() - mark.stat().st_mtime > NOACCESS_HOURS * 3600
 
 
 def _doc_type(meta: dict) -> str:

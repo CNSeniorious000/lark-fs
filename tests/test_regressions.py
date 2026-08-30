@@ -488,7 +488,7 @@ def test_a_sheet_is_asked_for_as_a_sheet(tmp_path, monkeypatch):
     asked: list[tuple[str, str]] = []
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}  # the freshness pass; this test is about the calls that follow it
         if argv[1] == "+fetch":
             raise cli.LarkError(list(argv), {"error": {"code": 3380002, "message": "Unsupported document type 'sheet'."}})
@@ -1301,7 +1301,7 @@ def test_comments_are_asked_for_even_when_the_body_has_settled(tmp_path, monkeyp
     calls: list[str] = []
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}  # the freshness pass; this test is about the calls that follow it
         calls.append(argv[1])
         if argv[1] == "+fetch":
@@ -1405,7 +1405,7 @@ def test_a_kind_the_comments_endpoint_cannot_name_is_not_asked_again(tmp_path, m
     calls = 0
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}  # the freshness pass; this test is about the calls that follow it
         nonlocal calls
         calls += 1
@@ -1759,7 +1759,7 @@ def test_a_wiki_link_that_is_not_a_node_settles_after_one_retry(tmp_path, monkey
     asked: list[str] = []
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}  # the freshness pass; this test is about the calls that follow it
         if argv[1] == "+fetch":
             return {"document": {"content": "body"}}
@@ -1795,7 +1795,7 @@ def test_every_answer_drive_gives_about_a_comment_list_is_recorded(tmp_path, mon
     asked: list[str] = []
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}  # the freshness pass; this test is about the calls that follow it
         if argv[1] == "+fetch":
             return {"document": {"content": "body"}}
@@ -2194,7 +2194,7 @@ def test_a_document_no_query_ranked_still_learns_when_it_changed(tmp_path, monke
     from lark_fs import sync as sync_module
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {
                 "metas": [
                     {
@@ -2247,7 +2247,7 @@ def test_the_only_text_a_search_hit_carries_is_kept(tmp_path, monkeypatch):
     from lark_fs import sync as sync_module
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}
         if argv[1] == "+fetch":
             raise cli.LarkError(list(argv), {"error": {"code": 3380002, "message": "Unsupported document type 'sheet'."}})
@@ -2394,7 +2394,7 @@ def test_the_export_records_which_revision_it_is(tmp_path, monkeypatch):
     from lark_fs import sync as sync_module
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}
         if argv[1] == "+fetch":
             return {"document": {"document_id": "tok1", "revision_id": 85, "content": "# 方案"}}
@@ -2443,7 +2443,7 @@ def test_a_body_that_did_not_change_is_not_exported_forever(tmp_path, monkeypatc
 
     async def fake_run(*argv, **_):
         nonlocal fetched
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}
         if argv[1] == "+fetch":
             fetched += 1
@@ -2475,7 +2475,7 @@ def test_a_clock_marker_advances_its_own_clock(tmp_path, monkeypatch):
     asked: list[str] = []
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             return {}
         asked.append(argv[1])
         if argv[1] == "+fetch":
@@ -2546,7 +2546,7 @@ def test_a_token_the_metas_batch_refused_is_asked_the_other_way(tmp_path, monkey
     asked: list[list[str]] = []
 
     async def fake_run(*argv, **_):
-        if argv[1] == "metas":
+        if argv[0] == "api" or argv[1] == "metas":
             docs = loads(argv[argv.index("--data") + 1])["request_docs"]
             asked.append([d["doc_type"] for d in docs])
             if docs[0]["doc_type"] == "wiki":
@@ -2619,3 +2619,36 @@ def test_the_node_list_already_knows_when_a_document_changed(tmp_path, monkeypat
     monkeypatch.setattr(cli, "run", lambda *a, **k: fake_run(*a, **k))
     run(sync_module.sync_docs(store, Progress(), search=False))
     assert store.read_yaml("docs/tok1/meta.yaml")["update_time"] == 1788090031, "the document still had no idea when it changed"
+
+
+def test_a_document_no_listing_can_reach_is_asked_by_name(tmp_path, monkeypatch):
+    """Four documents on this store export a body through `docs +fetch` and are unknown to
+    `metas` under every doc_type, and the node walk never met them either: `get_node` answers
+    `space_id: null`, so their wiki node belongs to no space this account can enumerate. That
+    endpoint still resolves them and gives the same `obj_edit_time`, which is the last place
+    to ask before a body that can be exported is frozen for good."""
+    from lark_fs import sync as sync_module
+
+    asked: list[str] = []
+
+    async def fake_run(*argv, **_):
+        if argv[0] == "api" and "get_node" in argv[2]:
+            asked.append(loads(argv[argv.index("--params") + 1])["token"])
+            return {"node": {"node_token": "nodcn1", "obj_token": "V3OS", "obj_type": "docx", "obj_edit_time": "1780054979", "space_id": None}}
+        if argv[1] == "metas":
+            return {"metas": [], "failed_list": [{"code": 970005, "token": "tok1"}]}
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "doc_types": "WIKI"})
+    store.write("docs/tok1/content.md", "a body every listing refuses to date")
+    store.write_yaml("docs/gone/meta.yaml", {"token": "gone", "doc_types": "WIKI"})
+    store.mark("docs/gone/.nobody", "deleted")
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+
+    assert asked == ["tok1"], f"only a document whose body we hold is worth asking about by name: {asked}"
+    row = store.read_yaml("docs/tok1/meta.yaml")
+    assert row["update_time"] == 1780054979, "the one endpoint that knows was never asked"
+    assert row["obj_token"] == "V3OS", "and the token it resolves to is worth keeping"
