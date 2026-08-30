@@ -478,6 +478,8 @@ def test_a_sheet_is_asked_for_as_a_sheet(tmp_path, monkeypatch):
     asked: list[tuple[str, str]] = []
 
     async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {}  # the freshness pass; this test is about the calls that follow it
         if argv[1] == "+fetch":
             raise cli.LarkError(list(argv), {"error": {"code": 3380002, "message": "Unsupported document type 'sheet'."}})
         asked.append((argv[argv.index("--token") + 1], argv[argv.index("--type") + 1]))
@@ -1289,6 +1291,8 @@ def test_comments_are_asked_for_even_when_the_body_has_settled(tmp_path, monkeyp
     calls: list[str] = []
 
     async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {}  # the freshness pass; this test is about the calls that follow it
         calls.append(argv[1])
         if argv[1] == "+fetch":
             return {"document": {"content": "body"}}
@@ -1391,6 +1395,8 @@ def test_a_kind_the_comments_endpoint_cannot_name_is_not_asked_again(tmp_path, m
     calls = 0
 
     async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {}  # the freshness pass; this test is about the calls that follow it
         nonlocal calls
         calls += 1
         raise cli.LarkError(list(argv), payload)
@@ -1743,6 +1749,8 @@ def test_a_wiki_link_that_is_not_a_node_settles_after_one_retry(tmp_path, monkey
     asked: list[str] = []
 
     async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {}  # the freshness pass; this test is about the calls that follow it
         if argv[1] == "+fetch":
             return {"document": {"content": "body"}}
         asked.append(kind := argv[argv.index("--type") + 1])
@@ -1777,6 +1785,8 @@ def test_every_answer_drive_gives_about_a_comment_list_is_recorded(tmp_path, mon
     asked: list[str] = []
 
     async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {}  # the freshness pass; this test is about the calls that follow it
         if argv[1] == "+fetch":
             return {"document": {"content": "body"}}
         asked.append(token := argv[argv.index("--token") + 1])
@@ -2163,3 +2173,57 @@ def test_the_wiki_pass_does_not_erase_what_the_search_learned(tmp_path, monkeypa
     assert row["update_time"] == 1787889415, "the node list erased the only signal that says when to re-export the body"
     assert row["owner_id"] == "ou_kj" and row["url"] == "https://x/wiki/n1", "a search row survives a run its queries missed"
     assert row["wiki_node_token"] == "n1" and row["space_id"] == "7383", "and the node list still contributes what only it knows"
+
+
+def test_a_document_no_query_ranked_still_learns_when_it_changed(tmp_path, monkeypatch):
+    """`update_time` is the only signal that says a body needs exporting again, and it used
+    to arrive only on a search hit -- so of 4140 documents 3360 had none, and their bodies
+    were frozen at whatever the run that first found them exported. `metas batch_query`
+    answers for 200 tokens at a time whichever pass found them, and it resolves a wiki token
+    to the document it wraps, which is the name the node lists use."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "metas":
+            return {
+                "metas": [
+                    {
+                        "doc_token": "tok1",
+                        "doc_type": "docx",
+                        "create_time": "1700000000",
+                        "latest_modify_time": "2000000000",
+                        "latest_modify_user": "ou_kj",
+                        "owner_id": "ou_kj",
+                        "title": "方案",
+                        "url": "https://x/docx/tok1",
+                        "request_doc_info": {"doc_token": "tok1", "doc_type": "docx"},
+                    },
+                    {
+                        "doc_token": "objtok",
+                        "doc_type": "docx",
+                        "create_time": "1700000000",
+                        "latest_modify_time": "1700000001",
+                        "owner_id": "ou_kj",
+                        "title": "包在节点里的",
+                        "url": "https://x/docx/objtok",
+                        "request_doc_info": {"doc_token": "nodetok", "doc_type": "wiki"},
+                    },
+                ]
+            }
+        if argv[1] == "+fetch":
+            return {"document": {"content": "a newer body"}}
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/tok1/meta.yaml", {"token": "tok1", "obj_type": "docx"})
+    store.write("docs/tok1/content.md", "the body an earlier run exported")
+    store.write_yaml("docs/nodetok/meta.yaml", {"token": "nodetok", "doc_types": "WIKI"})
+
+    run(sync_module.sync_docs(store, Progress(), search=False))
+
+    row = store.read_yaml("docs/tok1/meta.yaml")
+    assert row["update_time"] == 2000000000, "a document no query ranked never learned that it had changed"
+    assert row["owner_id"] == "ou_kj" and row["url"] == "https://x/docx/tok1", "the rest of what the batch answered is not derivable from anywhere else"
+    assert (tmp_path / "docs/tok1/content.md").read_text() == "a newer body", "the timestamp moved and the body was not exported again"
+    assert store.read_yaml("docs/nodetok/meta.yaml")["obj_token"] == "objtok", "a wiki token answers as the document it wraps, and that token is worth keeping"

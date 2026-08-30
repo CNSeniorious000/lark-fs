@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, MutableMapping
 from contextlib import aclosing
 from datetime import UTC, datetime, timedelta, timezone
 from itertools import islice
+from json import dumps
 from pathlib import Path
 from re import MULTILINE, compile
 from typing import Any
@@ -120,6 +121,7 @@ COMMENT_HOURS = 24.0  # for a document that has comments; the empty ones are 87%
 COMMENT_EMPTY_HOURS = 168.0
 BASE_HOURS = 24.0  # one `+table-list` per base, 178 of them
 NOACCESS_HOURS = 168.0  # how long anything nobody shared with us is left alone before asking again
+META_BATCH = 200  # `drive metas batch_query` refuses more request_docs than this
 RECHECK_FRESH_SECONDS = (
     3600.0  # how recently written counts as "just synced", for the half of the recheck that is not a sweep  # a minute appears only once the recording is processed, well after the meeting ends
 )
@@ -850,16 +852,42 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # what the mirror knows. A document discovered by an earlier run and not returned by
     # this one was never visited again, whatever state it was left in: 15 sat with a body
     # and no record of ever having been asked for comments, waiting for a slice that might
-    # never come back. The directory is the record of everything ever found, so anything
-    # there that still owes work is added to it -- a body as well as comments, since a
-    # transient failure on either leaves the same nothing behind. Reading every meta to
-    # answer that is 3.2s over 3630 documents, against the 223 that turn out to owe
-    # anything; it is worth it, because the alternative is what the search happens to rank.
-    for d in (store.root / "docs").glob("*"):
-        if d.is_dir() and d.name not in seen:
-            meta = store.read_yaml(f"docs/{d.name}/meta.yaml")
-            if _doc_is_stale(store, d.name, meta) or _doc_wants_comments(store, d.name):
-                seen[d.name] = meta
+    # never come back. The directory is the record of everything ever found, so the whole of
+    # it is what the rest of this pass works from.
+    on_disk = {d.name: store.read_yaml(f"docs/{d.name}/meta.yaml") for d in (store.root / "docs").glob("*") if d.is_dir()}
+
+    # Every document's freshness for 21 requests. `update_time` is the only thing that says a
+    # body needs exporting again, and it used to arrive only on a search hit -- so of 4140
+    # documents, 3360 had none and their bodies were frozen at whatever the run that first
+    # found them exported. `metas batch_query` answers for 200 tokens at a time, whichever
+    # pass found them, with the same number the search reports (checked on one holding both).
+    async def freshen(batch: list[tuple[str, str]]):
+        payload = dumps({"request_docs": [{"doc_token": t, "doc_type": k} for t, k in batch], "with_url": True})
+        try:
+            metas = (await cli.run("drive", "metas", "batch_query", "--data", payload) or {}).get("metas") or []
+        except cli.LarkError:
+            return  # a batch that does not answer is a batch of timestamps we already had
+        for m in metas:
+            token = ((m.get("request_doc_info") or {}).get("doc_token")) or m["doc_token"]
+            # `latest_modify_time` is this store's `update_time` under another name, and the
+            # `doc_type` it answers with is the *resolved* kind -- `doc_types` already records
+            # the kind this token has to be addressed by, and for a wiki token they differ.
+            row = {
+                "update_time": int(m["latest_modify_time"]),
+                "create_time": int(m["create_time"]),
+                "owner_id": m.get("owner_id"),
+                "latest_modify_user": m.get("latest_modify_user"),
+                "title": m.get("title"),
+                "url": m.get("url"),
+            }
+            if (own := m.get("doc_token")) and own != token:
+                row["obj_token"] = own  # a wiki token answers as the document it wraps, under the name the node lists use
+            on_disk[token] = {**on_disk.get(token, {}), **row}
+            store.write_yaml(f"docs/{token}/meta.yaml", on_disk[token])
+
+    asks = [(t, kind.lower()) for t, m in on_disk.items() if (kind := str(m.get("obj_type") or m.get("doc_types") or ""))]
+    await cli.spread(freshen, [asks[i : i + META_BATCH] for i in range(0, len(asks), META_BATCH)])
+    seen.update(on_disk)
 
     # bodies are the expensive part: fetch one only if we have none, or if the server's
     # update_time moved past the copy we already wrote. A doc can be edited at any time,
