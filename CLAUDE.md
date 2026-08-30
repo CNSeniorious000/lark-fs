@@ -57,6 +57,9 @@ Known traps, all hit in practice:
   wiki node list (`obj_token`), which is enumerated exhaustively — that took docs 260 -> 3861.
 - `im +chat-list` returns `chats`; members come from `+chat-members-list` as `users` + `bots`
   keyed by `member_id`, and need `im:chat.members:read` on top of `im:chat:read`.
+- the message shortcuts enrich a page with `POST /im/v1/messages/reactions/batch_query`,
+  one request per 20 messages, unless `--no-reactions` is passed. The walk and the two repair
+  paths pay it; `recheck` does not, because it re-reads 3000 already-known messages a run.
 - `wiki +node-list` returns one level; recurse via `has_child` + `--parent-node-token`.
 - `minutes +detail` is `minutes.get` + `GET /minutes/v1/minutes/{t}/artifacts` (its
   `--dry-run` prints both) and emits three of the first's eight fields, renames the second's

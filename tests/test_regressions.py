@@ -2319,3 +2319,33 @@ def test_a_table_keeps_the_schema_its_records_arrived_with(tmp_path, monkeypatch
     asked.clear()
     run(sync_module.sync_bases(store, Progress()))
     assert asked == [], f"a table with both was asked for anyway: {asked}"
+
+
+def test_a_message_keeps_the_reactions_it_arrived_with(tmp_path, monkeypatch):
+    """`--no-reactions` was on all four message calls, and 11% of messages carry one -- an
+    acknowledgement nothing else in the mirror records. The walk meets a message once, so it
+    pays the extra request per 20; the recheck tier re-reads 3000 known messages every half
+    hour and keeps the flag, which is the only reason it stays anywhere."""
+    from lark_fs import sync as sync_module
+
+    flags: list[bool] = []
+    msg = {"message_id": "om_1", "chat_id": "oc_1", "create_time": "2026-08-30 10:00", "content": "ok", "reactions": [{"reaction_type": {"emoji_type": "OK"}, "operators": [{"operator_id": "ou_kj"}]}]}
+
+    async def fake_run(*argv, **_):
+        flags.append("--no-reactions" in argv)
+        return {"messages": [msg]}
+
+    async def fake_paginate(*argv, **_k):
+        flags.append("--no-reactions" in argv)
+        yield msg
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", fake_paginate)
+    store = Store(tmp_path)
+    store.write_yaml("chats/oc_1/meta.yaml", {"chat_id": "oc_1"})
+
+    run(sync_module.sync_messages(store, Progress()))
+
+    assert flags and not any(flags), f"the walk asked for messages without the reactions on them: {flags}"
+    row = store.read_yaml("chats/oc_1/messages/2026-08/om_1.yaml")
+    assert row["reactions"][0]["reaction_type"]["emoji_type"] == "OK", f"the answer came back and nobody wrote it down: {row}"

@@ -195,7 +195,12 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
     async def drain(chat_id: str, start: str, end: str = "", limit: int = 0) -> tuple[str, bool]:
         """Walk one time window of a chat. Returns the newest create_time seen, and whether `limit` cut it short."""
         nonlocal total
-        argv = ["im", "+chat-messages-list", "--chat-id", chat_id, "--order", "asc", "--no-reactions", *(["--start", start] if start else []), *(["--end", end] if end else [])]
+        # Reactions come back with the page, for one extra request per 20 messages, and 11%
+        # of messages carry one -- in a work chat a 👌 from the right person is the answer, and
+        # nothing else in the mirror records it. Only the *walk* asks: it meets a message once,
+        # at ~2300 a day. The recheck tier below re-reads 3000 already-known messages every
+        # half hour, so asking there would quadruple the daemon's steady cost forever.
+        argv = ["im", "+chat-messages-list", "--chat-id", chat_id, "--order", "asc", *(["--start", start] if start else []), *(["--end", end] if end else [])]
         newest, seen = "", 0
         # this loop returns early once `limit` is reached, and the generator holds a
         # prefetched page in flight -- without aclosing that request is paid for, thrown
@@ -548,7 +553,7 @@ async def repair_thread(store: Store, thread: str, chat: str) -> list[dict]:
     """
     at = f"chats/{chat}/threads/{thread}"
     try:
-        replies = [m async for m in cli.paginate("im", "+threads-messages-list", "--thread", thread, "--no-reactions", key="messages") if m.get("message_id")]
+        replies = [m async for m in cli.paginate("im", "+threads-messages-list", "--thread", thread, key="messages") if m.get("message_id")]
     except cli.LarkError:
         return []
     for r in replies:
@@ -576,7 +581,7 @@ async def repair_unreadable(store: Store, chunk: list[tuple[str, str]]) -> list[
     about the messages in it, so the error is raised rather than reported as an empty
     answer. Told apart only by the caller, which is what clears the repair list.
     """
-    data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(mid for mid, _ in chunk), "--no-reactions")
+    data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(mid for mid, _ in chunk))  # a repaired message has to be as complete as a freshly walked one
     returned = {m["message_id"]: m for m in (data or {}).get("messages") or []}
     written = []
     for mid, rel in chunk:
@@ -1122,6 +1127,8 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
     for i in range(0, len(slice_), batch):
         chunk = slice_[i : i + batch]
         try:
+            # the only path that keeps `--no-reactions`: it re-reads 3000 already-known
+            # messages a run, and the merge below leaves whatever the walk already recorded
             data = await cli.run("im", "+messages-mget", "--message-ids", ",".join(chunk), "--no-reactions")
         except cli.LarkError:
             p.bump("recheck", len(chunk))
