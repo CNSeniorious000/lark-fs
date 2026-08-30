@@ -1531,25 +1531,30 @@ async def sync_bases(store: Store, p: Progress):
         for t in (tables or {}).get("tables") or []:
             tid = t.get("id")
             head = f"bases/{app_token}/tables/{tid}/meta.yaml"
-            store.write_yaml(head, {**store.read_yaml(head), **t})
+            was = store.read_yaml(head)
+            store.write_yaml(head, {**was, **t})
             rel = f"bases/{app_token}/tables/{tid}/records.yaml"
-            pulled = store.exists(rel)  # records are re-pulled only on demand; full-table diffing is a later concern
-            if pulled and "columns" in store.read_yaml(head):
+            # `+table-list` reports the same `rev` a record page carries -- checked on a table
+            # sitting at 1291 -- and this pass already pays for that listing. So a table whose
+            # rows have not moved costs nothing, and one whose rows have is pulled again
+            # instead of frozen at whatever the run that first met it happened to see.
+            current = store.exists(rel) and was.get("rev") == t.get("rev")
+            if current and "columns" in was:
                 continue
             # +record-list is offset-based (not page-token) and defaults to a markdown table.
-            # A table whose records are already down is asked for one row, because the header
-            # of any page carries the schema and that is the only thing still missing.
+            # A table that is current and only wants its schema is asked for one row, because
+            # the header of any page carries it and that is the only thing still missing.
             rows: list[dict] = []
             whole = True
             while True:
                 try:
-                    recs = await cli.run("base", "+record-list", "--base-token", app_token, "--table-id", tid, "--limit", "1" if pulled else "200", "--offset", str(len(rows))) or {}
+                    recs = await cli.run("base", "+record-list", "--base-token", app_token, "--table-id", tid, "--limit", "1" if current else "200", "--offset", str(len(rows))) or {}
                 except cli.LarkError:
                     whole = False
                     break
                 if not rows:
                     store.write_yaml(head, {**store.read_yaml(head), **_schema(recs)})
-                    if pulled:
+                    if current:
                         break
                 rows += _rows(recs)
                 if not recs.get("has_more"):
@@ -1557,7 +1562,7 @@ async def sync_bases(store: Store, p: Progress):
             # A half table written here is permanent -- `store.exists(rel)` above skips the
             # file forever after, so one rate-limited page in the middle freezes the first
             # 400 rows in place as if they were the whole thing.
-            if whole and not pulled:
+            if whole and not current:
                 store.write_yaml(rel, _clean(rows))
         p.bump("bases")
 

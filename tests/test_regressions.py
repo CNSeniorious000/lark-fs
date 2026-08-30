@@ -2273,7 +2273,8 @@ def test_a_table_keeps_the_schema_its_records_arrived_with(tmp_path, monkeypatch
     read. Column names alone are not a schema: the ids survive a rename, the types say how to
     read a cell, and `timezone` is what a date is relative to -- none of it is anywhere else in
     a response we were already paying for. The 584 tables already pulled are asked for a single
-    row, since any page's header carries it."""
+    row, since any page's header carries it. The listing reports the same `rev` a record page
+    does, so a table whose rows have moved is pulled again rather than frozen."""
     from lark_fs import sync as sync_module
 
     asked: list[str] = []
@@ -2290,7 +2291,7 @@ def test_a_table_keeps_the_schema_its_records_arrived_with(tmp_path, monkeypatch
 
     async def fake_run(*argv, **_):
         if argv[1] == "+table-list":
-            return {"tables": [{"id": "tbl_1", "name": "用例"}]}
+            return {"tables": [{"id": "tbl_1", "name": "用例", "rev": page["rev"]}]}
         asked.append(argv[argv.index("--limit") + 1])
         return page
 
@@ -2308,17 +2309,27 @@ def test_a_table_keeps_the_schema_its_records_arrived_with(tmp_path, monkeypatch
     assert asked == ["200"], f"the first pull is the whole table: {asked}"
 
     # a store that already has the records and not the schema pays one row, not the table again
-    store.write_yaml("bases/bas_1/tables/tbl_1/meta.yaml", {"id": "tbl_1", "name": "用例"})
+    store.write_yaml("bases/bas_1/tables/tbl_1/meta.yaml", {"id": "tbl_1", "name": "用例", "rev": 7})
     store.cursors.pop("swept")  # the daily clock is what decides *whether* to look; this is about what it costs when it does
     asked.clear()
     run(sync_module.sync_bases(store, Progress()))
-    assert asked == ["1"], f"a table whose records are already down was pulled again in full: {asked}"
+    assert asked == ["1"], f"a table whose rows have not moved was pulled again in full: {asked}"
     assert store.read_yaml("bases/bas_1/tables/tbl_1/meta.yaml")["rev"] == 7
 
     store.cursors.pop("swept")
     asked.clear()
     run(sync_module.sync_bases(store, Progress()))
     assert asked == [], f"a table with both was asked for anyway: {asked}"
+
+    # the rows moved, and the listing says so for free -- the table is pulled again
+    page["rev"] = 8
+    page["data"] = [["1", "x"], ["2", "y"]]
+    page["record_id_list"] = ["rec_1", "rec_2"]
+    store.cursors.pop("swept")
+    asked.clear()
+    run(sync_module.sync_bases(store, Progress()))
+    assert asked == ["200"], f"a table whose rows moved stayed frozen at what the first run saw: {asked}"
+    assert len(store.read_yaml_rows("bases/bas_1/tables/tbl_1/records.yaml")) == 2
 
 
 def test_a_message_keeps_the_reactions_it_arrived_with(tmp_path, monkeypatch):

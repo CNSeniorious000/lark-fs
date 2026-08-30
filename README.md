@@ -158,6 +158,11 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
   day, since a month is not always narrow enough. A plain sync walks only this month and
   the last — history does not grow backwards — and the walk over all of it is on the same
   six-hour clock, for an entry that lands further back than expected.
+- **base records** are pulled again only when the table's `rev` has moved. `+table-list`
+  reports the same revision a record page carries, and listing a base is a request this pass
+  already makes, so the check is free — before it, a table was pulled once and then frozen
+  at whatever the run that first met it happened to see. The table's own shape (column ids
+  and types, the timezone a date is read against) comes off the header of that same page.
 - **files** are skipped once their key's directory exists, including when it holds only
   the `.oversize` marker — which records the size that disqualified the file, so raising
   `max_mb` brings it back.
