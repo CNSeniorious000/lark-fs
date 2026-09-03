@@ -653,7 +653,11 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
         people = ((members or {}).get("users") or []) + [{**b, "is_bot": True} for b in ((members or {}).get("bots") or [])]
         for u in people:
             if oid := u.get("member_id") or u.get("open_id"):
-                store.write_yaml(f"users/{oid}/meta.yaml", _clean({"open_id": oid, **u}))
+                # merged: the profiles pass writes into this same file, and replacing it here
+                # erased its work every day -- 108 resolved people, all rewritten 7 seconds
+                # after the roster sweep and then all asked about again
+                rel = f"users/{oid}/meta.yaml"
+                store.write_yaml(rel, _clean({**store.read_yaml(rel), "open_id": oid, **u}))
         p.bump("chats", last=f"{len(people)} members")
 
     await cli.spread(one, todo)

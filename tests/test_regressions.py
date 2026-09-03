@@ -970,6 +970,29 @@ def test_a_roster_on_disk_is_not_a_roster_forever(tmp_path, monkeypatch):
     assert asked == [], "the clock did not hold; every sync would re-fetch every roster"
 
 
+def test_a_roster_refresh_does_not_erase_what_the_profiles_pass_learned(tmp_path, monkeypatch):
+    """Two passes write `users/<id>/meta.yaml`: the roster puts the person there with three
+    keys, and the profiles pass adds the alias, the email and whether they have left. The
+    roster wrote its three keys as the whole file, so every daily sweep erased the rest --
+    all 108 resolved people on this store carried an mtime seven seconds after the roster
+    sweep, and the profiles pass then asked about every one of them again."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        return {"users": [{"member_id": "ou_1", "name": "冯欢", "tenant_key": "T"}], "bots": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("chats/oc_1/meta.yaml", {"chat_id": "oc_1"})
+    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "name": "冯欢", "tenant_key": "T", "localized_name": "冯欢（Hera）", "is_resigned": False})
+
+    run(sync_module.sync_chat_meta(store, Progress(), {"oc_1"}))
+
+    got = store.read_yaml("users/ou_1/meta.yaml")
+    assert got["localized_name"] == "冯欢（Hera）" and got["is_resigned"] is False, f"the roster replaced the file instead of joining it: {got}"
+    assert got["member_id"] == "ou_1", "the roster's own keys still land"
+
+
 def test_a_meeting_still_waiting_for_its_minute_is_asked_again(tmp_path):
     """`minute_token` appears only once the recording is processed, after the meeting ends,
     so a detail fetched while it was running never has one. But a meeting the API has
