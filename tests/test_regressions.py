@@ -3014,3 +3014,26 @@ def test_the_wiki_walk_reaches_the_library_the_space_list_never_names(tmp_path, 
     store.cursors.pop("swept", None)
     run(sync_module.sync_wiki(store, Progress()))
     assert not swept_recently(store, "wiki", 24), "a walk that never reached the library claimed the day anyway"
+
+
+def test_a_search_that_flags_its_own_answer_as_partial_does_not_claim_the_window(tmp_path, monkeypatch):
+    """The search response carries a `notice` string the human-readable docs never mention;
+    the generated SDKs do, with "搜索结果不全" as its example. It is the only in-band signal
+    that a page is a partial one -- `has_more: false` says the paging ended, not that the
+    answer was whole -- and `paginate` read only the list, the cursor and `has_more`, so a
+    flagged answer was indistinguishable from a complete one and claimed its six hours."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+search":
+            return {"results": [{"entity_type": "DOC", "title_highlighted": "found", "result_meta": {"token": "tok1", "url": ""}}], "has_more": False, "notice": "搜索结果不全"}
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    p = Progress()
+    run(sync_module.sync_docs(store, p))
+
+    assert store.exists("docs/tok1/meta.yaml"), "what did come back is still worth keeping"
+    assert not swept_recently(store, "docs", 6), "an answer the endpoint itself called partial claimed the window"
+    assert "搜索结果不全" in p.rows["docs"]["note"], f"the endpoint's own warning was read and then not shown: {p.rows['docs']}"

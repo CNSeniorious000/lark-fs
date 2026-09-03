@@ -374,7 +374,7 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None, subject: str
     raise AssertionError("unreachable")
 
 
-async def paginate(*argv: str, key: str, page_size: int = 50, prefetch: bool = False):
+async def paginate(*argv: str, key: str, page_size: int = 50, prefetch: bool = False, notices: list[str] | None = None):
     """Yield items across pages for shortcuts exposing --page-token/--page-size.
 
     With `prefetch`, the next page is requested while the current one is still being
@@ -388,6 +388,11 @@ async def paginate(*argv: str, key: str, page_size: int = 50, prefetch: bool = F
     it. Reaching that `finally` at a useful moment is the caller's half of the deal:
     abandoning an async generator defers its cleanup to garbage collection, so consumers
     that may break out early wrap it in `contextlib.aclosing`.
+
+    `notices` collects what the search endpoints say about their own answer. The response
+    carries a `notice` string the human-readable docs never mention -- the generated SDKs
+    do, with "搜索结果不全" as its example -- and it is the only in-band signal that a page
+    is a partial one. `has_more: false` says the paging ended, not that the answer was whole.
     """
 
     size = page_size
@@ -411,6 +416,8 @@ async def paginate(*argv: str, key: str, page_size: int = 50, prefetch: bool = F
         data = await fetch(None)
         while data:
             items = data.get(key) or []
+            if notices is not None and isinstance(notice := data.get("notice"), str) and notice:
+                notices.append(notice)
             token = data.get("page_token")
             upcoming = None
             if token and data.get("has_more"):

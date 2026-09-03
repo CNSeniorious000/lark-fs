@@ -914,6 +914,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     alias = _wiki_aliases(store)
     found: list[tuple[str, str]] = []  # documents linked from the bodies this run fetched
     probed = search and not queries  # a custom query set sweeps a different corpus; it is not the scheduled pass
+    notices: list[str] = []  # what the endpoint itself said about its answers; anything here means a partial one
     # Sequential on purpose, and it is the one pass that does not fan out. Walking the 14
     # queries end to end runs at ~1.15 req/s, which is under whatever sustained budget the
     # endpoint enforces: measured twice, 14/14 queries answered, 4762 hits, 217s. Spreading
@@ -923,7 +924,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # not. This loop's slowness is the pacing.
     for q in queries or DOC_QUERIES if search else ():
         try:
-            async for r in cli.paginate("drive", "+search", "--query", q, key="results"):
+            async for r in cli.paginate("drive", "+search", "--query", q, key="results", notices=notices):
                 meta = r.get("result_meta") or {}
                 if not (token := str(meta.get("token") or "")):
                     continue
@@ -971,8 +972,11 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # A sweep that was cut short must not claim its window: coasting six hours on a corpus
     # missing 60% of its hits is worse than paying for the pass again next run, and the
     # limit that caused it clears in seconds. Measured clean, the sequential walk answers
-    # 14 of 14, so this is the rare case rather than the usual one.
-    if probed and seen:
+    # 14 of 14, so this is the rare case rather than the usual one. The endpoint can also
+    # say so itself: `has_more: false` means the paging ended, and a `notice` on any page
+    # means the answer it paged through was not the whole one.
+    partial = f", search said: {cli.oneline(notices[0], 40)}" if notices else ""
+    if probed and seen and not notices:
         record_sweep(store, "docs")
 
     # wiki nodes point at real documents and are enumerated exhaustively, unlike search
@@ -1086,7 +1090,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # update_time moved past the copy we already wrote. A doc can be edited at any time,
     # so there is no window to bound this -- the timestamp is the only reliable signal.
     todo = [t for t, meta in seen.items() if _doc_is_stale(store, t, meta) or _doc_wants_comments(store, t)]
-    p.set("docs", done=0, total=len(todo), note=f"{len(seen)} docs")
+    p.set("docs", done=0, total=len(todo), note=f"{len(seen)} docs{partial}")
 
     async def body(token: str):
         title = cli.oneline(seen[token].get("title") or token, 48)
@@ -1181,7 +1185,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
 
     await cli.spread(counted, todo)
     _flush_doc_links(store, found)
-    p.set("docs", state="done", note=f"{len(seen)} docs")
+    p.set("docs", state="done", note=f"{len(seen)} docs{partial}")
 
 
 # What `drive +list-comments --type` will name. A type outside this set is not a soft

@@ -91,6 +91,10 @@ Known traps, all hit in practice:
   and drops `keywords`. It is also the reason `--transcript` needed `cwd` set to the store
   root: it wrote the file itself rather than returning it. Both endpoints are asked directly
   now, for the same two requests. `artifacts` needs its flags as a `--params` JSON object.
+- Search responses carry a `notice` string the human-readable docs never mention; the
+  generated SDKs do, with "搜索结果不全" as its example. `has_more: false` says the paging
+  ended, not that the answer was whole -- `paginate(notices=...)` collects it, and a docs
+  sweep with one on any page does not claim its window. Not seen firing here yet.
 - Search endpoints return HTML-entity-escaped text with `<h>` hit markers; unescape it
   or the on-disk copy is not greppable. Use `_clean`, never bare `html.unescape` — the
   stdlib also decodes semicolon-less entities, so `&timestamp=` in a URL silently becomes
