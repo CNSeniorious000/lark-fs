@@ -769,7 +769,9 @@ def _record_sender(store: Store, msg: dict, known: set[str]):
     known.add(oid)
     rel = f"users/{oid}/meta.yaml"
     if not store.exists(rel):
-        store.write_yaml(rel, {"open_id": oid, "name": sender.get("name", ""), "sender_type": sender.get("sender_type", ""), "tenant_key": sender.get("tenant_key", "")})
+        # `sender_i18n_names` too: for the 15k people outside this tenant, whom `+search-user`
+        # will never resolve, a message is the only place their other name is ever written
+        store.write_yaml(rel, {"open_id": oid, "name": sender.get("name", ""), "sender_type": sender.get("sender_type", ""), "tenant_key": sender.get("tenant_key", ""), **({"i18n_names": names} if (names := sender.get("sender_i18n_names")) else {})})
 
 
 # Drive search returns a ranked slice, not the corpus: an empty query yields far fewer

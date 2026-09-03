@@ -342,6 +342,19 @@ def test_migration_reaches_replies_the_projections_never_saw(tmp_path):
     assert "img_v3_deep" in {r["key"] for r in store.glob_rows("chats/*/media.yaml")}, "a reply's attachment was never indexed"
 
 
+def test_a_sender_s_other_name_reaches_the_user_file(tmp_path):
+    """A sender carries `sender_i18n_names` beside `name`, and only `name` was copied. For the
+    15k people outside this tenant, whom `+search-user` never resolves, a message is the only
+    place the other name is ever written -- and 52 messages in one external chat carry an
+    `en_us` that differs from the `zh_cn`."""
+    from lark_fs.sync import _record_sender
+
+    store = Store(tmp_path)
+    msg = {"message_id": "om_1", "sender": {"id": "ou_x", "id_type": "open_id", "name": "凌晨", "sender_type": "user", "tenant_key": "other", "sender_i18n_names": {"en_us": "Ling", "zh_cn": "凌晨"}}}
+    _record_sender(store, msg, set())
+    assert store.read_yaml("users/ou_x/meta.yaml")["i18n_names"] == {"en_us": "Ling", "zh_cn": "凌晨"}, "the message named this person twice and the file says it once"
+
+
 def test_migration_does_not_reparse_an_already_split_store(tmp_path):
     """It runs at the head of every sync, so a store that is already split must cost a stat
     per thread rather than a parse of every message in it."""
