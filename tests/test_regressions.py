@@ -635,19 +635,23 @@ def test_a_failed_sweep_does_not_claim_its_window(tmp_path, monkeypatch):
 
 
 def test_a_sweep_cut_short_does_not_claim_its_window(tmp_path, monkeypatch):
-    """A query refused mid-pagination loses every page after it, and `except LarkError`
+    """A window refused mid-pagination loses every page after it, and `except LarkError`
     swallows that -- so the pass looks like it succeeded. Measured against the real
-    endpoint: run sequentially it answers 14 of 14 for 4762 hits, but spread three-wide
-    nine queries were cut short by 99991400 and 2840 of those hits never arrived.
+    endpoint before the rate gate: spread three-wide, nine of fourteen queries were cut
+    short by 99991400 and 2840 of 4762 hits never arrived.
 
     Coasting six hours on a corpus missing 60% of itself is worse than paying for the pass
     again, and the limit that caused it clears in seconds."""
     from lark_fs import sync as sync_module
 
+    answered = 0
+
     async def flaky_run(*argv, **_):
+        nonlocal answered
         if argv[1] != "+search":
             raise cli.LarkError(list(argv), {"error": {"code": 1069307}})
-        if argv[argv.index("--query") + 1] != "":
+        answered += 1
+        if answered > 1:
             raise cli.LarkError(list(argv), {"error": {"code": 99991400, "message": "rate limit"}})
         return {"results": [{"entity_type": "DOC", "title_highlighted": "found", "result_meta": {"token": "tok1", "url": ""}}]}
 
@@ -656,8 +660,9 @@ def test_a_sweep_cut_short_does_not_claim_its_window(tmp_path, monkeypatch):
 
     run(sync_module.sync_docs(store, Progress()))
 
-    assert store.exists("docs/tok1/meta.yaml"), "the one query that answered was not written"
-    assert swept_recently(store, "docs", 6) is False, "a sweep that lost 13 of 14 queries claimed its six hours"
+    assert store.exists("docs/tok1/meta.yaml"), "the one window that answered was not written"
+    assert answered > 1, "the test never reached a refused window"
+    assert swept_recently(store, "docs", 6) is False, "a sweep that lost all but one window claimed its six hours"
 
 
 def test_every_document_kind_is_named_the_way_drive_names_it():
@@ -3039,6 +3044,46 @@ def test_a_search_that_flags_its_own_answer_as_partial_does_not_claim_the_window
     assert not swept_recently(store, "docs", 6), "an answer the endpoint itself called partial claimed the window"
     assert "搜索结果不全" in p.rows["docs"]["note"], f"the endpoint's own warning was read and then not shown: {p.rows['docs']}"
 
+
+def test_the_document_walk_slices_the_empty_query_by_creation_and_splits_a_full_window(tmp_path, monkeypatch):
+    """An empty query with no filter stops at ~288 hits however it is sorted, and the
+    `page_token` says why: the server *recalled* that many, and paging only walks the recall.
+    Fourteen keyword probes were the workaround and found 1439 of this store's 3857 older
+    documents; the same empty query sliced by `create_time` found 2915. The recall is
+    per window, so a window that fills to the cap is the first N of an unknown number --
+    the same March answered 235 in one piece and 269 in quarters -- and is split, the way a
+    month of meetings is. Feishu's own templates ride along from every tenant and are not
+    this tenant's documents."""
+    from lark_fs import sync as sync_module
+
+    windows: list[tuple[int, int]] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] != "+search":
+            return {"items": []}
+        lo, hi = int(argv[argv.index("--created-since") + 1]), int(argv[argv.index("--created-until") + 1])
+        windows.append((lo, hi))
+        if hi - lo > 20 * 86400:  # a whole month: comes back at the ceiling
+            return {"results": [{"entity_type": "DOC", "title_highlighted": f"t{i}", "result_meta": {"token": f"cap{lo}_{i:03d}", "url": ""}} for i in range(sync_module.SEARCH_WINDOW_CAP)]}
+        return {
+            "results": [
+                {"entity_type": "DOC", "title_highlighted": "ours", "result_meta": {"token": f"own{lo}", "url": "https://acme.feishu.cn/docx/x", "owner_name": "同事", "is_cross_tenant": False}},
+                {"entity_type": "DOC", "title_highlighted": "模板", "result_meta": {"token": f"tpl{lo}", "url": "https://www.feishu.cn/docx/y", "owner_name": "云文档助手", "is_cross_tenant": True}},
+            ]
+        }
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("docs/old/meta.yaml", {"token": "old", "create_time": int(datetime(2026, 7, 15, tzinfo=UTC).timestamp())})
+
+    run(sync_module.sync_docs(store, Progress()))
+
+    assert windows, "the walk never asked anything"
+    assert min(lo for lo, _ in windows) <= int(datetime(2026, 7, 1, tzinfo=UTC).timestamp()), "the walk did not start where the store's history begins"
+    assert any(hi - lo <= 16 * 86400 for lo, hi in windows), f"a month at the ceiling was taken as an answer instead of being split: {windows}"
+    assert not any(d.name.startswith("tpl") for d in (tmp_path / "docs").iterdir()), "a Feishu template from another tenant was mirrored as one of ours"
+    assert any(d.name.startswith("own") for d in (tmp_path / "docs").iterdir()), "the tenant's own document in the same window was dropped with it"
+    assert swept_recently(store, "docs", 6), "a walk every window of which answered did not claim its window"
 
 
 def test_the_search_gate_spends_its_budget_and_no_more():

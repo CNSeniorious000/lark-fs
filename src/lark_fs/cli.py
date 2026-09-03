@@ -191,7 +191,7 @@ def _label(argv: tuple[str, ...]) -> tuple[str, str]:
     domain, *rest = argv
     verb = rest[0].lstrip("+") if rest else ""
     # a time-windowed sweep is better identified by its window than by any token in it
-    if start := dict(pairwise(argv)).get("--start"):
+    if start := (flags := dict(pairwise(argv))).get("--start") or flags.get("--created-since"):
         return domain, f"{verb} {start[:10]}"
     ids = [v for f, v in pairwise(argv) if f.startswith("--") and RE_ID.fullmatch(v)]
     return domain, f"{verb} {ids[-1]}".strip() if ids else verb

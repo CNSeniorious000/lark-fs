@@ -70,9 +70,17 @@ Known traps, all hit in practice:
   column matrix (`fields` + `data` + `record_id_list`) rather than row objects.
 - `base +table-list` wants `--base-token` (not `--app-token`) and keys tables by `id`.
 - `docs +fetch` puts the body at `data.document.content`.
-- `drive +search` returns a *ranked slice*, not the corpus: an empty query yielded 260 hits
-  where the word 设计 alone yielded 400+. Coverage needs several probes unioned, plus the
-  wiki node list (`obj_token`), which is enumerated exhaustively — that took docs 260 -> 3861.
+- `drive +search` is a browse, not the corpus, and it indexes what the caller has *opened
+  or been added to*, not what they may read: 773 documents on this store export a body and
+  never appear in any search. An empty query with no filter stops at ~288 hits however it
+  is sorted -- the `page_token` is base64 JSON whose `before_current_strategy_have_recalled_count`
+  equals the `total`, so the ceiling is on the recall and paging only walks it. Slicing the
+  same empty query by `create_time` recalls per window (5181 tokens over this store against
+  2915 from fourteen keyword probes), and a window that fills past `SEARCH_WINDOW_CAP` is
+  split, since one March answered 235 whole and 269 in quarters. Nothing proves a window
+  complete. Feishu's templates ride along as `is_cross_tenant` hits owned by 云文档助手 and
+  飞书多维表格 and are skipped. The endpoint is 100/min; `cli.search_gate` holds the fan-out
+  under it -- bare over the semaphore at width 3 the walk lost 2840 of 4762 hits.
 - `im +chat-list` returns `chats`; members come from `+chat-members-list` as `users` + `bots`
   keyed by `member_id`, and need `im:chat.members:read` on top of `im:chat:read`.
 - the message shortcuts enrich a page with `POST /im/v1/messages/reactions/batch_query`,

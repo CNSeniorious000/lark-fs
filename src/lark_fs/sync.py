@@ -393,8 +393,9 @@ RE_DOC_LINK = compile(r"(?:feishu\.cn|larksuite\.com)/(" + "|".join(LINK_TYPES) 
 def _doc_links(text: str) -> list[tuple[str, str]]:
     """Documents named by a link in this text, as (token, type).
 
-    A search returns a ranked slice and the wiki walk only covers the wiki, so between them
-    they miss what people actually pass around and what documents point at: 417 of the 900
+    Search indexes what the caller has opened or been added to, not what they may read, and
+    the wiki walk only covers the wiki -- so between them they miss what people actually pass
+    around and what documents point at: 417 of the 900
     linked in these chats had never been mirrored, and another 495 are linked from document
     bodies. Reading the link costs nothing -- the text is already in hand -- and its path
     segment is the type, which is the one thing `+list-comments` cannot be asked without.
@@ -863,9 +864,34 @@ def _record_sender(store: Store, msg: dict, known: set[str]):
         )
 
 
-# Drive search returns a ranked slice, not the corpus: an empty query yields far fewer
-# hits than a common word does, so coverage comes from unioning several probes.
-DOC_QUERIES = ["", "a", "e", "的", "会议", "设计", "项目", "需求", "方案", "数据", "模型", "文档", "记录", "计划"]
+# The search is a browse, not a corpus: an empty query with no filter stops at ~288 hits
+# however it is sorted, and the `page_token` says why -- the server *recalled* that many
+# and paging only walks the recall. Slicing the same empty query by `create_time` recalls
+# afresh per window: month windows over this store answered 5181 tokens against 2915 from
+# fourteen keyword probes, and a window that fills past this many is split, since the same
+# March came back as 235 in one piece and 269 in quarters. Nothing above this is a promise
+# of completeness; the endpoint offers none, and 773 readable documents on this store are in
+# no window at all -- search indexes what the caller has opened or been added to, not what
+# they may read, and those came in through links. Templates Feishu shares with every tenant
+# ride along as `is_cross_tenant` hits from the same two accounts; the 21 real ones from
+# other tenants all arrived through links too, so those are skipped rather than mirrored.
+SEARCH_WINDOW_CAP = 200
+SEARCH_WIDTH = 4  # windows in flight; `cli.search_gate` holds the sum under the endpoint's 100/min
+TEMPLATE_OWNERS = {"云文档助手", "飞书多维表格"}
+
+
+def _first_month(store: Store) -> datetime:
+    """Where the document walk begins: the oldest `create_time` on disk, or a year back.
+
+    Search hits and `metas` both write it, so once anything is mirrored the store knows how
+    far back to look; a fresh one has no idea and a year is the cheap guess -- 12 windows.
+    """
+    stamps = [int(m[1]) for f in (store.root / "docs").glob("*/meta.yaml") if (m := RE_CREATED.search(f.read_text()))]
+    start = datetime.fromtimestamp(min(stamps), TENANT_TZ) if stamps else datetime.now(TENANT_TZ) - timedelta(days=365)
+    return start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+RE_CREATED = compile(r"^create_time: (\d{9,})$", MULTILINE)
 
 
 def _wiki_aliases(store: Store) -> dict[str, str]:
@@ -884,10 +910,10 @@ def swept_recently(store: Store, name: str, hours: float) -> bool:
     """Has this discovery pass run within `hours`?
 
     Measured over one full sync: 442 of 1247 requests were the wiki tree walk and 248 were
-    the doc search probes -- 55% of the run, spent rediscovering corpora that barely move.
+    the doc search -- 55% of the run, spent rediscovering corpora that barely move.
     Neither can be made incremental, and it is not for want of trying: a wiki node carries
-    no update time (only token, type, title and has_child) and a search returns a ranked
-    slice with no cursor. Frequency is the only variable left.
+    no update time (only token, type, title and has_child) and a search window recalls
+    afresh each time, with no cursor across runs. Frequency is the only variable left.
 
     An explicit `--only wiki` always sweeps: asking for a collection by name is asking for
     it now, and this only governs what a plain `sync` does on its own initiative.
@@ -915,59 +941,92 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     found: list[tuple[str, str]] = []  # documents linked from the bodies this run fetched
     probed = search and not queries  # a custom query set sweeps a different corpus; it is not the scheduled pass
     notices: list[str] = []  # what the endpoint itself said about its answers; anything here means a partial one
-    # Sequential on purpose, and it is the one pass that does not fan out. Walking the 14
-    # queries end to end runs at ~1.15 req/s, which is under whatever sustained budget the
-    # endpoint enforces: measured twice, 14/14 queries answered, 4762 hits, 217s. Spreading
-    # them over the shared semaphore is 10x faster and silently wrong -- at width 3 nine
-    # queries were cut short by 99991400 and 2840 of those 4762 hits never arrived; at width
-    # 8, more. The burst is fine (14 first pages at 8-way, zero 429s); the sustained rate is
-    # not. This loop's slowness is the pacing.
-    for q in queries or DOC_QUERIES if search else ():
+
+    def keep(r: dict) -> bool:
+        """Record one search hit. False when it was not a document of this tenant's."""
+        nonlocal probed
+        meta = r.get("result_meta") or {}
+        if not (token := str(meta.get("token") or "")) or (meta.get("is_cross_tenant") and meta.get("owner_name") in TEMPLATE_OWNERS):
+            return False
+        kind = ""
+        if r.get("entity_type") == "WIKI":
+            if resolved := alias.get(token):
+                token = resolved  # the node token this hit carries is not the document's own
+            else:
+                # Not in any node list we hold, so the node token is all we will ever
+                # have for it. Drive answers 1069307 for a node token asked for as the
+                # docx it wraps, and answers it as `wiki` -- and 131005 if a resolved
+                # obj_token is asked for that way, so this cannot be applied blanket.
+                kind = "wiki"
+        if token in seen:
+            return True
+        title = _clean(r.get("title_highlighted"))
+        # The one thing in a hit that is not in `result_meta`, and for the 438
+        # documents that export no body -- sheets, bitables, mindnotes, the ones
+        # nobody shared -- it is the only text of their contents this mirror will
+        # ever hold. Query-bound, so a later query's snippet replaces it; `<b>` and
+        # `<hb>` are the endpoint's own emphasis markers and are not part of the text.
+        summary = cli.unescape_entities(cli.RE_MARKUP.sub("", r.get("summary_highlighted") or ""))
+        _note_tenant(meta.get("url", ""))
+        # `kind` has to survive to disk: 260 documents are addressable only as `wiki`,
+        # and a later run that meets one through the directory instead of a search hit
+        # would re-derive `docx` from `doc_types`, get 1069307, and file it as having no
+        # comments -- the first one tried this way had four. The row is merged over
+        # what is already there for the same reason the wiki pass merges: the two
+        # discovery routes describe the same document and know different things.
+        seen[token] = {
+            **store.read_yaml(f"docs/{token}/meta.yaml"),
+            **meta,
+            "token": token,
+            "entity_type": r.get("entity_type"),
+            "title": title,
+            **({"summary": summary} if summary else {}),
+            **({"comment_type": kind} if kind else {}),
+        }
+        store.write_yaml(f"docs/{token}/meta.yaml", seen[token])
+        p.bump("docs", last=cli.oneline(title))
+        return True
+
+    async def window(lo: datetime, hi: datetime) -> int:
+        """One `create_time` window of the empty query. Returns how many hits it held."""
+        nonlocal probed
+        n = 0
+        try:
+            async for r in cli.paginate("drive", "+search", "--query", "", "--created-since", str(int(lo.timestamp())), "--created-until", str(int(hi.timestamp())), key="results", notices=notices):
+                n += 1
+                keep(r)
+        except cli.LarkError:
+            probed = False  # cut short: the rest of this window's pages are gone, so the corpus on disk is partial
+        return n
+
+    # A keyword query still means what it did: the caller wants that word's hits, not a walk
+    for q in queries or ():
         try:
             async for r in cli.paginate("drive", "+search", "--query", q, key="results", notices=notices):
-                meta = r.get("result_meta") or {}
-                if not (token := str(meta.get("token") or "")):
-                    continue
-                kind = ""
-                if r.get("entity_type") == "WIKI":
-                    if resolved := alias.get(token):
-                        token = resolved  # the node token this hit carries is not the document's own
-                    else:
-                        # Not in any node list we hold, so the node token is all we will ever
-                        # have for it. Drive answers 1069307 for a node token asked for as the
-                        # docx it wraps, and answers it as `wiki` -- and 131005 if a resolved
-                        # obj_token is asked for that way, so this cannot be applied blanket.
-                        kind = "wiki"
-                if token in seen:
-                    continue
-                title = _clean(r.get("title_highlighted"))
-                # The one thing in a hit that is not in `result_meta`, and for the 438
-                # documents that export no body -- sheets, bitables, mindnotes, the ones
-                # nobody shared -- it is the only text of their contents this mirror will
-                # ever hold. Query-bound, so a later query's snippet replaces it; `<b>` and
-                # `<hb>` are the endpoint's own emphasis markers and are not part of the text.
-                summary = cli.unescape_entities(cli.RE_MARKUP.sub("", r.get("summary_highlighted") or ""))
-                _note_tenant(meta.get("url", ""))
-                # `kind` has to survive to disk: 260 documents are addressable only as `wiki`,
-                # and a later run that meets one through the directory instead of a search hit
-                # would re-derive `docx` from `doc_types`, get 1069307, and file it as having no
-                # comments -- the first one tried this way had four. The row is merged over
-                # what is already there for the same reason the wiki pass merges: the two
-                # discovery routes describe the same document and know different things.
-                seen[token] = {
-                    **store.read_yaml(f"docs/{token}/meta.yaml"),
-                    **meta,
-                    "token": token,
-                    "entity_type": r.get("entity_type"),
-                    "title": title,
-                    **({"summary": summary} if summary else {}),
-                    **({"comment_type": kind} if kind else {}),
-                }
-                store.write_yaml(f"docs/{token}/meta.yaml", seen[token])
-                p.bump("docs", last=cli.oneline(title))
+                keep(r)
         except cli.LarkError:
-            probed = False  # cut short: the rest of this query's pages are gone, so the corpus on disk is partial
-            continue
+            probed = False
+    if search and not queries:
+        # Windows fan out `SEARCH_WIDTH` wide and `cli.search_gate` holds their sum under the
+        # endpoint's 100 a minute: spread bare over the semaphore the same walk lost 2840 of
+        # 4762 hits to 99991400. A window that fills to the cap is split until it does not,
+        # the way a month of meetings is; one that will not split any finer is taken as is.
+        now = datetime.now(TENANT_TZ)
+        start = _first_month(store)
+        months: list[tuple[datetime, datetime]] = []
+        while start < now:
+            nxt = (start + timedelta(days=32)).replace(day=1)
+            months.append((start, min(nxt, now + timedelta(days=1))))
+            start = nxt
+        p.set("docs", total=len(months), done=0, note=f"{len(months)} months")
+
+        async def month(span: tuple[datetime, datetime]):
+            try:
+                await _sweep_window(*span, SEARCH_WINDOW_CAP, window)
+            finally:
+                p.bump("docs")
+
+        await cli.spread(month, months, width=SEARCH_WIDTH)
 
     # A sweep that was cut short must not claim its window: coasting six hours on a corpus
     # missing 60% of its hits is worse than paying for the pass again next run, and the
@@ -983,7 +1042,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     for node in store.glob_rows("wiki/*/nodes.yaml"):
         if (token := node.get("obj_token")) and node.get("obj_type") in ("docx", "doc", "sheet", "bitable") and token not in seen:
             # Merged, not replaced. This pass runs on every sync and the search above is a
-            # ranked slice, so a document the queries missed this time used to have its whole
+            # recall per window, so a document it missed this time used to have its whole
             # search row -- owner, url, and the `update_time` that decides whether its body is
             # re-exported -- overwritten by these five keys. 2289 of 4140 documents on this
             # store were in that state, which is to say their bodies had stopped refreshing.
@@ -1008,12 +1067,12 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
             store.write_yaml(f"docs/{token}/meta.yaml", seen[token])
             p.bump("docs", last=cli.oneline(node.get("title")))
 
-    # A search is a ranked slice, so `seen` is what this run happened to be handed -- not
-    # what the mirror knows. A document discovered by an earlier run and not returned by
-    # this one was never visited again, whatever state it was left in: 15 sat with a body
-    # and no record of ever having been asked for comments, waiting for a slice that might
-    # never come back. The directory is the record of everything ever found, so the whole of
-    # it is what the rest of this pass works from.
+    # A search is what its windows recalled, so `seen` is what this run happened to be
+    # handed -- not what the mirror knows. A document discovered by an earlier run and not
+    # returned by this one was never visited again, whatever state it was left in: 15 sat
+    # with a body and no record of ever having been asked for comments, waiting for a hit
+    # that might never come back. The directory is the record of everything ever found, so
+    # the whole of it is what the rest of this pass works from.
     on_disk = {d.name: store.read_yaml(f"docs/{d.name}/meta.yaml") for d in (store.root / "docs").glob("*") if d.is_dir()}
 
     # Every document's freshness for 21 requests. `update_time` is the only thing that says a
@@ -1700,8 +1759,8 @@ async def sync_bases(store: Store, p: Progress):
     except cli.LarkError:
         pass
 
-    # One empty query is one ranked slice: it found 11 of the 178 bitables the document
-    # pass already has on disk, which asks 14 queries and writes down what each hit was.
+    # One unwindowed empty query recalls ~288 hits: it found 11 of the 178 bitables the
+    # document pass already has on disk, which walks windows and writes down what each hit was.
     # The type is a plain scalar, so it is matched in the text rather than parsed -- 0.6s
     # across 3049 files against 3.6s, for an answer that was identical on every one.
     tokens |= {f.parent.name for f in (store.root / "docs").glob("*/meta.yaml") if RE_BITABLE.search(f.read_text())}
