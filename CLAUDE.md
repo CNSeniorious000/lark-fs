@@ -78,6 +78,9 @@ Known traps, all hit in practice:
 - the message shortcuts enrich a page with `POST /im/v1/messages/reactions/batch_query`,
   one request per 20 messages, unless `--no-reactions` is passed. The walk and the two repair
   paths pay it; `recheck` does not, because it re-reads 3000 already-known messages a run.
+- `wiki +space-list` never returns anyone's 我的文档库, its own included -- the docs say so. It
+  has a real space_id and pages like any other space; only `GET /wiki/v2/spaces/my_library`
+  reaches it, so the walk asks for it by name and then walks it under the id it answers with.
 - the wiki node walk goes to the raw `GET /wiki/v2/spaces/{id}/nodes`, not `+node-list`:
   the shortcut emits 8 of the 16 fields a node carries, and one it drops is `obj_edit_time` --
   the same number `metas` calls `latest_modify_time`, and the only freshness signal for a

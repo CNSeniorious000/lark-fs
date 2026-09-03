@@ -2972,3 +2972,45 @@ def test_a_rewritten_unreadable_file_is_as_complete_as_a_walked_one(tmp_path, mo
     row = store.read_yaml(rel)
     assert row["content"] == "recovered", "the test never reached the rewrite it is about"
     assert row["root_id"] == "om_root", f"the rewrite left out what the walk would have recorded: {row}"
+
+
+def test_the_wiki_walk_reaches_the_library_the_space_list_never_names(tmp_path, monkeypatch):
+    """`GET /wiki/v2/spaces` "不会返回我的文档库" -- the docs say so, and this account's own was
+    not in it: 64 nodes, 3 of them in no other listing. The library has a real space_id and
+    pages like any other space; only the *name* `my_library` reaches it, so it has to be
+    asked for on its own and walked under the id it answers with."""
+    from lark_fs import sync as sync_module
+
+    urls: list[str] = []
+
+    async def fake_run(*argv, **_):
+        urls.append(argv[2] if argv[0] == "api" else argv[1])
+        if argv[1] == "+space-list":
+            return {"spaces": [{"space_id": "s1", "name": "团队"}]}
+        if argv[0] == "api" and argv[2].endswith("/spaces/my_library"):
+            return {"space": {"space_id": "7616528372545424587", "name": "My Document Library", "space_type": "my_library"}}
+        if argv[0] == "api" and "/nodes" in argv[2]:
+            sid = argv[2].split("/spaces/")[1].split("/")[0]
+            return {"items": [{"node_token": f"n_{sid}", "obj_token": f"tok_{sid}", "obj_type": "docx", "title": sid}]}
+        return {}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    run(sync_module.sync_wiki(store, Progress()))
+
+    assert any(u.endswith("/spaces/7616528372545424587/nodes") for u in urls), f"the library was never walked under its own id: {urls}"
+    assert not any("/spaces/my_library/nodes" in u for u in urls), "walk it under the id it answers with, so its nodes land in one directory across runs"
+    assert store.read_yaml_rows("wiki/7616528372545424587/nodes.yaml")[0]["obj_token"] == "tok_7616528372545424587"
+    assert store.read_yaml("wiki/7616528372545424587/meta.yaml")["space_type"] == "my_library"
+    assert store.read_yaml_rows("wiki/s1/nodes.yaml"), "the listed space still has to be walked too"
+    assert swept_recently(store, "wiki", 24), "a whole walk claims its day"
+
+    async def library_refused(*argv, **_):
+        if argv[0] == "api" and argv[2].endswith("/spaces/my_library"):
+            raise cli.LarkError(list(argv), {"error": {"code": 99991400}})
+        return await fake_run(*argv, **_)
+
+    monkeypatch.setattr(cli, "run", library_refused)
+    store.cursors.pop("swept", None)
+    run(sync_module.sync_wiki(store, Progress()))
+    assert not swept_recently(store, "wiki", 24), "a walk that never reached the library claimed the day anyway"

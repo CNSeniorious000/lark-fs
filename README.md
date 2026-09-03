@@ -97,7 +97,7 @@ instead of being buried in `\n` escapes.
   meetings/<meeting_id>.yaml                       # host, participants, minute_token / note_id
   notes/<note_id>.yaml                             # which documents a meeting note is made of
   bases/<app_token>/tables/<table_id>/{meta.yaml,records.yaml}
-  wiki/<space_id>/{meta.yaml,nodes.yaml}
+  wiki/<space_id>/{meta.yaml,nodes.yaml}         # every space the account can list, plus its own 我的文档库
 ```
 
 ## Attachments

@@ -1773,6 +1773,16 @@ async def sync_wiki(store: Store, p: Progress):
         p.set("wiki", state="error", note=str(e.payload)[:60])
         return
     items = (spaces or {}).get("spaces") or []
+    complete = True
+    # The list never includes anyone's 我的文档库 -- the docs say so, and this account's own
+    # was not in it: 64 nodes here, 3 of them in no other listing. It has a real space_id and
+    # its nodes page like any other space's; only the *name* `my_library` reaches it.
+    try:
+        mine = ((await cli.run("api", "GET", "/open-apis/wiki/v2/spaces/my_library")) or {}).get("space") or {}
+        if mine.get("space_id") and mine["space_id"] not in {s.get("space_id") for s in items}:
+            items.append(mine)
+    except cli.LarkError:
+        complete = False  # a walk that never reached the library cannot claim the day either
     p.set("wiki", note=f"{len(items)} spaces")
 
     async def level(sid: str, parent: str | None) -> list[dict] | None:
@@ -1822,8 +1832,6 @@ async def sync_wiki(store: Store, p: Progress):
             # frontier still queued -- a space count would sit at 0/1 for the whole sweep
             p.set("wiki", done=len(found), total=len(found) + len(frontier), note=f"{len(frontier)} branches queued")
         return found, whole
-
-    complete = True
 
     async def one(space: dict):
         nonlocal complete
