@@ -1,15 +1,16 @@
 """Thin async wrapper around the `lark-cli` binary."""
 
-from asyncio import CancelledError, Semaphore, create_subprocess_exec, create_task, gather, shield, sleep, subprocess
+from asyncio import CancelledError, Lock, Semaphore, create_subprocess_exec, create_task, gather, shield, sleep, subprocess
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Collection
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from contextvars import ContextVar
 from html import unescape
 from itertools import count, pairwise
 from json import JSONDecoder
 from os import environ
 from re import compile
+from time import monotonic
 from typing import Any
 
 # The search endpoints rate-limit hard (that is what forced this down to 3), but the
@@ -17,6 +18,40 @@ from typing import Any
 # 429s, against 10 msg/s before. Raise this only with a measurement, never a guess.
 CONCURRENCY = 8
 _sem = Semaphore(CONCURRENCY)
+
+
+class RateGate:
+    """Admit at most `limit` requests per rolling `seconds`, whoever is asking.
+
+    The document search is limited to 100 a minute (its own docs say so), and that is a
+    budget, not a width: fanning windows out over the shared semaphore blew through it at
+    width 3 and lost 2840 of 4762 hits to 99991400, while one sequential walk at ~1.15/s
+    never touched it. A gate spends the same budget with as many requests in flight as
+    the semaphore allows, so the walk runs at the endpoint's ceiling instead of under it.
+    """
+
+    def __init__(self, limit: int, seconds: float):
+        self.limit, self.seconds = limit, seconds
+        self.stamps: deque[float] = deque()
+        self.lock = Lock()  # one waiter at a time, so a freed slot admits one request and not the whole queue
+
+    async def __aenter__(self):
+        async with self.lock:
+            while True:
+                now = monotonic()
+                while self.stamps and now - self.stamps[0] >= self.seconds:
+                    self.stamps.popleft()
+                if len(self.stamps) < self.limit:
+                    self.stamps.append(now)
+                    return
+                await sleep(self.stamps[0] + self.seconds - now)
+
+    async def __aexit__(self, *_):
+        pass
+
+
+# 90 of the documented 100 a minute, so the retry that follows a refusal has room to land
+search_gate = RateGate(90, 60.0)
 
 FEED_LIMIT = 40  # per-group history depth; the TUI decides how much of it to show
 
@@ -326,7 +361,9 @@ async def run(*argv: str, retries: int = 5, cwd: str | None = None, subject: str
     args = ["lark-cli", *argv, "--format", "json"]
     delay = 2.0
     for attempt in range(retries):
-        async with _sem:
+        # the budget is waited out before a slot is taken, so a search that is only waiting
+        # for its minute does not hold one of the eight slots every other collection needs
+        async with search_gate if argv[:2] == ("drive", "+search") else nullcontext(), _sem:
             rid = next(_next_id)
             if feed_enabled:
                 domain, guessed = _label(argv)

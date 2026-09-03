@@ -7,6 +7,7 @@ from io import StringIO
 from itertools import pairwise
 from json import loads
 from os import utime
+from time import monotonic
 
 import pytest
 from yaml import safe_load
@@ -3037,3 +3038,55 @@ def test_a_search_that_flags_its_own_answer_as_partial_does_not_claim_the_window
     assert store.exists("docs/tok1/meta.yaml"), "what did come back is still worth keeping"
     assert not swept_recently(store, "docs", 6), "an answer the endpoint itself called partial claimed the window"
     assert "搜索结果不全" in p.rows["docs"]["note"], f"the endpoint's own warning was read and then not shown: {p.rows['docs']}"
+
+
+
+def test_the_search_gate_spends_its_budget_and_no_more():
+    """The document search is 100 a minute, and that is a budget rather than a width: spread
+    bare over the semaphore the walk lost 2840 of 4762 hits to 99991400, while one sequential
+    walk never touched the limit and took 217s. A gate lets as many run at once as the
+    semaphore allows and still admits no more than the limit inside any window."""
+    gate = cli.RateGate(3, 0.2)
+    admitted: list[float] = []
+
+    async def one():
+        async with gate:
+            admitted.append(monotonic())
+
+    async def drive():
+        await gather(*(one() for _ in range(7)))
+
+    run(drive())
+    admitted.sort()
+    for i in range(3, len(admitted)):
+        assert admitted[i] - admitted[i - 3] >= 0.2 - 0.01, f"four admitted inside one window: {[round(t - admitted[0], 3) for t in admitted]}"
+    assert admitted[-1] - admitted[0] < 1.0, "the gate is far slower than the budget allows"
+
+
+def test_the_search_gate_admits_only_the_search():
+    """Every other request goes straight to the semaphore; a gate on all of them would
+    throttle a chat walk that sustains 88 msg/s without ever seeing a 429."""
+    gated: list[tuple[str, ...]] = []
+
+    class Gate:
+        async def __aenter__(self):
+            gated.append(("drive", "+search"))
+
+        async def __aexit__(self, *_):
+            pass
+
+    class Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b'{"ok": true, "data": {}}', b""
+
+    async def _done(x):
+        return x
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cli, "search_gate", Gate())
+        mp.setattr(cli, "create_subprocess_exec", lambda *_a, **_k: _done(Proc()))
+        run(cli.run("drive", "+search", "--query", ""))
+        run(cli.run("im", "+chat-list"))
+    assert gated == [("drive", "+search")], f"the gate admitted the wrong requests: {gated}"
