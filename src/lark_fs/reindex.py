@@ -7,9 +7,9 @@ can be brought up to date locally instead of re-fetching under a rate limit.
 
 from pathlib import Path
 
-from yaml import YAMLError, safe_load
+from yaml import YAMLError
 
-from .store import Store
+from .store import Store, load_yaml
 from .sync import _doc_links, _flush_doc_links, _flush_media, _index_media, _record_sender, migrate_meetings, migrate_minutes, migrate_threads
 
 
@@ -26,7 +26,7 @@ def reindex(root: Path) -> dict[str, int]:
 
     for path in sorted((root / "chats").glob("*/*/*/*.yaml")):
         try:
-            msg = safe_load(path.read_text())
+            msg = load_yaml(path.read_text())
         except YAMLError:
             # Written by a serializer that could not round-trip what the message contained.
             # The file is on disk but says nothing readable, and only the API still has the
@@ -65,7 +65,7 @@ def _damaged(root: Path) -> list[Path]:
     out = []
     for f in root.rglob("*.yaml"):
         try:
-            safe_load(f.read_text())
+            load_yaml(f.read_text())
         except YAMLError, UnicodeDecodeError:
             out.append(f)
     return out

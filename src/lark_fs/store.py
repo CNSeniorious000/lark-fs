@@ -30,9 +30,16 @@ from json import dumps, loads
 from pathlib import Path
 from typing import Any
 
-from yaml import YAMLError, safe_load
+from yaml import CSafeLoader, YAMLError, load
 
 from .yaml import readable_yaml_dumps
+
+
+def load_yaml(text: str) -> Any:
+    """`safe_load`, through libyaml. The pure-Python loader is what `safe_load` picks, and
+    on this store it is seven times slower for the same answer -- checked equal over 3764
+    files of every kind the mirror writes. 4269 document metas went from 1.1s to 0.15s."""
+    return load(text, Loader=CSafeLoader)
 
 
 class Store:
@@ -116,7 +123,7 @@ class Store:
         if not path.exists():
             return {}
         try:
-            return safe_load(path.read_text()) or {}
+            return load_yaml(path.read_text()) or {}
         except YAMLError:
             return {}
 
@@ -137,7 +144,7 @@ def _unquote(value: str) -> str:
     is only paid for on a value that was quoted, which in a 40k-row index is a handful.
     """
     if value.startswith('"'):
-        return safe_load(value)
+        return load_yaml(value)
     if value.startswith("'") and value.endswith("'"):
         return value[1:-1].replace("''", "'")
     return value

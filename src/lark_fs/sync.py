@@ -6,9 +6,9 @@ Search-backed collections (docs/minutes/meetings) have no server-side cursor, so
 they re-list metadata (cheap) but skip fetching bodies for entities already on disk.
 """
 
-from asyncio import create_task, gather
+from asyncio import create_task, gather, sleep
 from bisect import bisect_right
-from collections.abc import Awaitable, Callable, MutableMapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, MutableMapping
 from contextlib import aclosing
 from datetime import UTC, datetime, timedelta, timezone
 from itertools import islice
@@ -28,6 +28,24 @@ TZ = "+08:00"
 
 
 FIRST_MONTH = "2023-01-01"  # only used the first time, before the store can answer
+
+
+async def _paced[T](items: Iterable[T], every: int = 64) -> AsyncIterator[T]:
+    """Iterate on the loop, handing it back every `every` items.
+
+    Reading the 4269 document metas or the 16109 user files is a second or three of disk
+    work, and written as one comprehension it is a second or three during which nothing
+    else runs: no request completes, no row moves, the spinner stops, and a ctrl-c waits
+    for it to finish. That was the "stuck for a while, then fine" the sync kept showing --
+    measured at 2.0s, 1.9s and 3.5s stalls on this store. A thread would fix it too, and
+    would let a stub another pass is writing be read half-written; this keeps every read
+    whole and only lets the loop breathe between them. `sleep(0)` is one loop turn, which
+    is what the renderer needs to land a frame.
+    """
+    for i, item in enumerate(items):
+        if i and i % every == 0:
+            await sleep(0)
+        yield item
 
 
 def _earliest(store: Store, collection: str, since: str, pattern: str = "*/*.yaml") -> datetime:
@@ -785,7 +803,7 @@ async def sync_profiles(store: Store, p: Progress):
     # the union_id, the employee number or the en_name that only this endpoint reports.
     if oid := me.get("open_id"):
         store.write_yaml(f"users/{oid}/meta.yaml", _clean({**store.read_yaml(f"users/{oid}/meta.yaml"), **me}))
-    on_disk = {d.name: store.read_yaml(f"users/{d.name}/meta.yaml") for d in (store.root / "users").glob("ou_*")}
+    on_disk = {d.name: store.read_yaml(f"users/{d.name}/meta.yaml") async for d in _paced((store.root / "users").glob("ou_*"))}
     # a resolved profile is not a permanent one: an email, a department and an activation
     # state all change, and "localized_name is present" was reading as "done for good"
     stale = not swept_recently(store, "profiles", PROFILE_HOURS)
@@ -880,13 +898,13 @@ SEARCH_WIDTH = 4  # windows in flight; `cli.search_gate` holds the sum under the
 TEMPLATE_OWNERS = {"云文档助手", "飞书多维表格"}
 
 
-def _first_month(store: Store) -> datetime:
+async def _first_month(store: Store) -> datetime:
     """Where the document walk begins: the oldest `create_time` on disk, or a year back.
 
     Search hits and `metas` both write it, so once anything is mirrored the store knows how
     far back to look; a fresh one has no idea and a year is the cheap guess -- 12 windows.
     """
-    stamps = [int(m[1]) for f in (store.root / "docs").glob("*/meta.yaml") if (m := RE_CREATED.search(f.read_text()))]
+    stamps = [int(m[1]) async for f in _paced((store.root / "docs").glob("*/meta.yaml")) if (m := RE_CREATED.search(f.read_text()))]
     start = datetime.fromtimestamp(min(stamps), TENANT_TZ) if stamps else datetime.now(TENANT_TZ) - timedelta(days=365)
     return start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -1012,7 +1030,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         # 4762 hits to 99991400. A window that fills to the cap is split until it does not,
         # the way a month of meetings is; one that will not split any finer is taken as is.
         now = datetime.now(TENANT_TZ)
-        start = _first_month(store)
+        start = await _first_month(store)
         months: list[tuple[datetime, datetime]] = []
         while start < now:
             nxt = (start + timedelta(days=32)).replace(day=1)
@@ -1073,7 +1091,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # with a body and no record of ever having been asked for comments, waiting for a hit
     # that might never come back. The directory is the record of everything ever found, so
     # the whole of it is what the rest of this pass works from.
-    on_disk = {d.name: store.read_yaml(f"docs/{d.name}/meta.yaml") for d in (store.root / "docs").glob("*") if d.is_dir()}
+    on_disk = {d.name: store.read_yaml(f"docs/{d.name}/meta.yaml") async for d in _paced((store.root / "docs").glob("*")) if d.is_dir()}
 
     # Every document's freshness for 21 requests. `update_time` is the only thing that says a
     # body needs exporting again, and it used to arrive only on a search hit -- so of 4140
@@ -1148,7 +1166,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
     # bodies are the expensive part: fetch one only if we have none, or if the server's
     # update_time moved past the copy we already wrote. A doc can be edited at any time,
     # so there is no window to bound this -- the timestamp is the only reliable signal.
-    todo = [t for t, meta in seen.items() if _doc_is_stale(store, t, meta) or _doc_wants_comments(store, t)]
+    todo = [t async for t, meta in _paced(seen.items()) if _doc_is_stale(store, t, meta) or _doc_wants_comments(store, t)]
     p.set("docs", done=0, total=len(todo), note=f"{len(seen)} docs{partial}")
 
     async def body(token: str):
@@ -1352,8 +1370,8 @@ async def recheck_messages(store: Store, p: Progress, *, window_days: int = 30, 
     only narrows the main line; the cursor is what bounds the work either way.
     """
     cutoff = (datetime.now(UTC) - timedelta(days=window_days)).strftime("%Y-%m")
-    files = [f for f in (store.root / "chats").glob("*/messages/*/*.yaml") if f.parent.name >= cutoff]
-    files += [f for f in (store.root / "chats").glob("*/threads/*/*.yaml") if f.stem != "meta"]
+    files = [f async for f in _paced((store.root / "chats").glob("*/messages/*/*.yaml"), 1024) if f.parent.name >= cutoff]
+    files += [f async for f in _paced((store.root / "chats").glob("*/threads/*/*.yaml"), 1024) if f.stem != "meta"]
     if not files:
         return
 
@@ -1763,7 +1781,7 @@ async def sync_bases(store: Store, p: Progress):
     # document pass already has on disk, which walks windows and writes down what each hit was.
     # The type is a plain scalar, so it is matched in the text rather than parsed -- 0.6s
     # across 3049 files against 3.6s, for an answer that was identical on every one.
-    tokens |= {f.parent.name for f in (store.root / "docs").glob("*/meta.yaml") if RE_BITABLE.search(f.read_text())}
+    tokens |= {f.parent.name async for f in _paced((store.root / "docs").glob("*/meta.yaml")) if RE_BITABLE.search(f.read_text())}
 
     # Listing a base is a request per base, so 178 of them is a whole sync's worth on every
     # run. Nothing about a bitable says when it last changed, so it is a clock like the rest.

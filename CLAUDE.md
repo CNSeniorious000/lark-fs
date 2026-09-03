@@ -192,6 +192,12 @@ not one that only shows in a transient state:
   bodies stay greppable as plain lines. Never write JSON for entity data.
 - `Progress` rows are reactive: replace the whole row dict, never mutate in place, or
   subscribers are not notified.
+- Never scan the store in one expression on the loop. Reading 4269 document metas or 16109
+  user files is seconds of disk work, and as one comprehension it is seconds in which no
+  request completes, no row moves, the spinner stops and a ctrl-c waits -- "stuck for a
+  while, then fine". Iterate through `_paced`, which hands the loop back every N items and
+  keeps every read whole, which a thread would not. `Store.read_yaml` goes through libyaml
+  for the same reason: the pure loader `safe_load` picks is seven times slower.
 - Progress that looks frozen is usually pacing, not rendering: a page of 20 messages is
   written in ~6ms and then the next request takes ~1.8s. `paginate(prefetch=True)` starts
   the next request first and spreads the current page across its flight time, so counters

@@ -3135,3 +3135,56 @@ def test_the_search_gate_admits_only_the_search():
         run(cli.run("drive", "+search", "--query", ""))
         run(cli.run("im", "+chat-list"))
     assert gated == [("drive", "+search")], f"the gate admitted the wrong requests: {gated}"
+
+
+
+def test_a_scan_of_the_store_lets_the_loop_turn(tmp_path, monkeypatch):
+    """Reading every document meta, or every user file, was one comprehension on the loop:
+    2.0s and 3.5s on this store during which no request completed, no row moved, the
+    spinner froze and a ctrl-c waited -- the "stuck for a while, then fine" the sync kept
+    showing. The scan has to hand the loop back as it goes."""
+    from lark_fs import sync as sync_module
+    from lark_fs.store import Store as StoreClass
+
+    reads = 0
+    real = StoreClass.read_yaml
+
+    def counted(self, rel):
+        nonlocal reads
+        reads += 1
+        return real(self, rel)
+
+    monkeypatch.setattr(StoreClass, "read_yaml", counted)
+
+    async def fake_run(*argv, **_):
+        return {"user": {"open_id": "ou_me", "tenant_key": "t1"}} if argv[1] == "+get-user" else {"items": [], "metas": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    for i in range(600):
+        store.write_yaml(f"docs/tok{i:04d}/meta.yaml", {"token": f"tok{i:04d}"})
+        store.write_yaml(f"users/ou_{i:04d}/meta.yaml", {"open_id": f"ou_{i:04d}", "tenant_key": "t1", "i18n_names": {}})
+
+    async def measure(pass_):
+        nonlocal reads
+        reads = 0
+        seen: list[int] = []
+
+        async def ticker():
+            while True:
+                await sleep(0)
+                seen.append(reads)
+
+        t = create_task(ticker())
+        seen.append(reads)  # the sample before the pass gets the loop: a scan that never yields shows up as one gap of everything
+        await pass_
+        seen.append(reads)
+        t.cancel()
+        with suppress(BaseException):
+            await t
+        return reads, max(b - a for a, b in pairwise(seen))
+
+    for name, coro in (("docs", sync_module.sync_docs(store, Progress(), search=False)), ("profiles", sync_module.sync_profiles(store, Progress()))):
+        total, widest = run(measure(coro))
+        assert total >= 600, f"{name}: the test never reached the scan it is about ({total} reads)"
+        assert widest <= 256, f"{name}: {widest} files were read without the loop getting a turn"
