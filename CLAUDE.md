@@ -36,9 +36,11 @@ the sync reports success. Confirm the shape with a real call before writing a sy
 Known traps, all hit in practice:
 
 - `minutes +search` caps `--page-size` at 30; 50 is a hard 400.
-- `contact +search-user --left-organization` is a filter (`is_resigned: true` in the request),
-  not a field: someone who left answers the same row as a colleague, `is_activated: true`
-  included. Who left is learned only by asking the same ids again with the flag.
+- `contact +search-user` picks one locale out of a person's `i18n_names` and drops the rest
+  (28 of 108 people here carry a different name in another) and drops `tenant_id`; `--left-organization`
+  is a filter (`is_resigned: true` in the request), not a field, and someone who left answers the
+  same row as a colleague, `is_registered: true` included. The profiles pass reads
+  `POST /contact/v3/users/search` itself, and asks the same ids twice, once with the filter.
 - `contact +search-user --user-ids` caps at 20 *matches*, not 20 ids, and does not
   paginate: 20 resolvable ids come back as 20 rows with `has_more: true`, 19 as 19 without
   one, and 50 as the same 20. Batch under the cap — a capped batch has silently lost its

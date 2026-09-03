@@ -19,6 +19,19 @@ from lark_fs.sync import SLICE_HOURS, STAMP, TENANT_TZ, Progress, _edit_signal, 
 from lark_fs.yaml import JSON, readable_yaml_dumps
 
 
+def _person(oid: str, name: str, **meta) -> dict:
+    """One row as `POST /contact/v3/users/search` answers it: the name lives in `i18n_names`, the rest in `meta_data`."""
+    return {"id": oid, "display_info": f"{name}\n\n", "meta_data": {"i18n_names": {"zh_cn": name, "en_us": name}, "chat_id": "", "is_registered": True, "is_cross_tenant": False, **meta}}
+
+
+def _asked_ids(argv: tuple) -> list[str]:
+    return loads(argv[argv.index("--data") + 1])["filter"]["user_ids"]
+
+
+def _wants_resigned(argv: tuple) -> bool:
+    return loads(argv[argv.index("--data") + 1])["filter"].get("is_resigned") is True
+
+
 def _schedule(mode: str, seconds: float = 1.5) -> dict[str, int]:
     """Run three collections of very different size for a fixed window; report what each got."""
     work = {"big": 4000, "small": 60, "tiny": 12}
@@ -426,43 +439,64 @@ def test_every_codepoint_round_trips():
             assert safe_load(readable_yaml_dumps(value)) == value, f"U+{cp:04X} in bare {value!r} did not survive"
 
 
-def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
-    """Three of the eleven keys a row carries are not facts about the person: `open_id` is the
-    directory's own name, `match_segments` echoes the query, and `chat_recency_hint` renders
-    the current moment ("Contacted today"), so keeping it rewrites every user file on every
-    sync to say the same thing about a different day. The other eight land, `has_chatted` and
-    `is_cross_tenant` among them -- nothing else reports either -- without burying the
-    roster's own `name`, which is the richer one."""
+def test_a_profile_row_is_kept_whole_and_the_moment_it_rendered_is_not(tmp_path, monkeypatch):
+    """`+search-user` picked one locale out of `i18n_names` and dropped the rest -- 28 of this
+    store's 108 resolved people have a different name in another -- and dropped `tenant_id`.
+    The raw row's `meta_data` lands whole, with the name the shortcut would have picked and the
+    department line beside it. `display_info`'s last line renders the current moment ("Contacted
+    today"), so keeping it rewrites every user file on every sync to say the same thing about a
+    different day; it does not land, and neither does the roster's own `name` get buried."""
     from lark_fs import sync as sync_module
 
     async def fake_run(*argv, **_):
         if argv[1] == "+get-user":
             return {"user": {"tenant_key": "T"}}
-        ids = argv[argv.index("--user-ids") + 1].split(",")
-        if "--left-organization" in argv:
-            ids = [i for i in ids if i == "ou_2"]
-        return {
-            "users": [
-                {"open_id": i, "name": "", "localized_name": "Mia(张亚)", "chat_recency_hint": "Contacted today", "match_segments": [], "has_chatted": True, "is_cross_tenant": True} for i in ids
-            ]
-        }
+        ids = [i for i in _asked_ids(argv) if i == "ou_2"] if _wants_resigned(argv) else _asked_ids(argv)
+        rows = [{**_person(i, "付豪", chat_id="oc_p2p", tenant_id="6831"), "display_info": "付豪\nMind Lab\n[Contacted today]"} for i in ids]
+        for r in rows:
+            r["meta_data"]["i18n_names"]["en_us"] = "Hao Fu"
+        return {"items": rows}
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
-    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "member_id": "ou_1", "name": "张亚", "tenant_key": "T"})
-    store.write_yaml("users/ou_2/meta.yaml", {"open_id": "ou_2", "member_id": "ou_2", "name": "张亚", "tenant_key": "T"})
+    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "member_id": "ou_1", "name": "付豪", "tenant_key": "T"})
+    store.write_yaml("users/ou_2/meta.yaml", {"open_id": "ou_2", "member_id": "ou_2", "name": "付豪", "tenant_key": "T"})
 
     run(sync_module.sync_profiles(store, Progress()))
 
     got = store.read_yaml("users/ou_1/meta.yaml")
-    assert got["localized_name"] == "Mia(张亚)", "the alias that disambiguates same-named people was not taken"
-    assert got["name"] == "张亚" and got["member_id"] == "ou_1", f"the roster's own fields were overwritten: {got}"
-    assert got["has_chatted"] is True and got["is_cross_tenant"] is True, f"two facts nothing else reports were dropped: {got}"
-    assert not {"chat_recency_hint", "match_segments"} & got.keys(), f"a rendering of now landed on disk: {got}"
+    assert got["i18n_names"] == {"zh_cn": "付豪", "en_us": "Hao Fu"}, f"the other name this person goes by was dropped: {got}"
+    assert got["localized_name"] == "付豪" and got["department"] == "Mind Lab", f"the two derived fields the shortcut used to give are gone: {got}"
+    assert got["tenant_id"] == "6831" and got["chat_id"] == "oc_p2p" and got["is_registered"] is True, f"the raw row did not land whole: {got}"
+    assert got["name"] == "付豪" and got["member_id"] == "ou_1", f"the roster's own fields were overwritten: {got}"
+    assert "display_info" not in got, f"a rendering of now landed on disk: {got}"
     # the one fact the row does not carry: the filtered query is what says who left, and its
     # absence has to be written too, or nothing on disk ever says a person is still here
     assert got["is_resigned"] is False, f"a colleague still here was not written as such: {got}"
     assert store.read_yaml("users/ou_2/meta.yaml")["is_resigned"] is True, "the person the filter returned was not marked as having left"
+
+
+def test_the_shortcut_s_names_for_a_field_do_not_survive_beside_the_endpoint_s(tmp_path, monkeypatch):
+    """A file written by the `+search-user` version says `p2p_chat_id`; the endpoint says `chat_id`.
+    Merging the new row over the old file would keep both, and `rg p2p_chat_id` would go on
+    matching a key nothing writes any more. The two email keys are the exception: `+get-user`
+    writes `email` / `enterprise_email` onto the account we run as, and those are its own names."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+get-user":
+            return {"user": {"tenant_key": "T"}}
+        return {"items": [] if _wants_resigned(argv) else [_person("ou_1", "凌晨", chat_id="oc_p2p")]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "tenant_key": "T", "localized_name": "凌晨", "p2p_chat_id": "oc_p2p", "is_activated": True, "has_chatted": True, "email": "me@x.ltd"})
+
+    run(sync_module.sync_profiles(store, Progress()))
+
+    got = store.read_yaml("users/ou_1/meta.yaml")
+    assert got["chat_id"] == "oc_p2p" and not {"p2p_chat_id", "is_activated", "has_chatted"} & got.keys(), f"the same fact under two names: {got}"
+    assert got["email"] == "me@x.ltd", f"a key another writer owns was stripped as if it were the shortcut's: {got}"
 
 
 def test_a_person_who_left_and_came_back_is_no_longer_marked_as_gone(tmp_path, monkeypatch):
@@ -476,10 +510,8 @@ def test_a_person_who_left_and_came_back_is_no_longer_marked_as_gone(tmp_path, m
     async def fake_run(*argv, **_):
         if argv[1] == "+get-user":
             return {"user": {"tenant_key": "T"}}
-        ids = argv[argv.index("--user-ids") + 1].split(",")
-        if "--left-organization" in argv:
-            ids = [i for i in ids if i in left]
-        return {"users": [{"open_id": i, "localized_name": "Mia(张亚)"} for i in ids]}
+        ids = [i for i in _asked_ids(argv) if i in left] if _wants_resigned(argv) else _asked_ids(argv)
+        return {"items": [_person(i, "Mia(张亚)") for i in ids]}
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -505,9 +537,9 @@ def test_a_filtered_query_that_failed_does_not_read_as_nobody_left(tmp_path, mon
     async def fake_run(*argv, **_):
         if argv[1] == "+get-user":
             return {"user": {"tenant_key": "T"}}
-        if "--left-organization" in argv:
+        if _wants_resigned(argv):
             raise cli.LarkError(list(argv), {"error": {"code": 99991400}})
-        return {"users": [{"open_id": "ou_1", "localized_name": "Mia(张亚)"}]}
+        return {"items": [_person("ou_1", "Mia(张亚)")]}
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -991,18 +1023,18 @@ def test_a_roster_refresh_does_not_erase_what_the_profiles_pass_learned(tmp_path
     sweep, and the profiles pass then asked about every one of them again."""
     from lark_fs import sync as sync_module
 
-    async def fake_run(*argv, **_):
+    async def fake_run(*_a, **_k):
         return {"users": [{"member_id": "ou_1", "name": "冯欢", "tenant_key": "T"}], "bots": []}
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
     store.write_yaml("chats/oc_1/meta.yaml", {"chat_id": "oc_1"})
-    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "name": "冯欢", "tenant_key": "T", "localized_name": "冯欢（Hera）", "is_resigned": False})
+    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "name": "冯欢", "tenant_key": "T", "localized_name": "冯欢(Hera)", "is_resigned": False})
 
     run(sync_module.sync_chat_meta(store, Progress(), {"oc_1"}))
 
     got = store.read_yaml("users/ou_1/meta.yaml")
-    assert got["localized_name"] == "冯欢（Hera）" and got["is_resigned"] is False, f"the roster replaced the file instead of joining it: {got}"
+    assert got["localized_name"] == "冯欢(Hera)" and got["is_resigned"] is False, f"the roster replaced the file instead of joining it: {got}"
     assert got["member_id"] == "ou_1", "the roster's own keys still land"
 
 
@@ -1688,7 +1720,10 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
         asked.append(argv[2].rsplit("/", 1)[1])
         return {
             "note": {
-                "artifacts": [{"artifact_type": 1, "create_time": "1771508960", "doc_token": "NoteDocToken00000000001"}, {"artifact_type": 2, "create_time": "1771508961", "doc_token": "VerbatimToken0000000001"}],
+                "artifacts": [
+                    {"artifact_type": 1, "create_time": "1771508960", "doc_token": "NoteDocToken00000000001"},
+                    {"artifact_type": 2, "create_time": "1771508961", "doc_token": "VerbatimToken0000000001"},
+                ],
                 "create_time": "1771508960",
                 "creator_id": "ou_pony",
                 "note_display_type": 1,
@@ -2027,7 +2062,7 @@ def test_a_profiles_pass_that_resolves_nobody_still_claims_its_week(tmp_path, mo
     async def fake_run(*argv, **_):
         if argv[1] == "+get-user":
             return {"user": {"tenant_key": "t1"}}
-        return {"users": []}  # answered, and nobody there resolves
+        return {"items": []}  # answered, and nobody there resolves
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -2487,7 +2522,7 @@ def test_the_account_we_run_as_is_a_person_the_store_already_has(tmp_path, monke
     async def fake_run(*argv, **_):
         if argv[1] == "+get-user":
             return {"user": {"open_id": "ou_me", "tenant_key": "T", "name": "庄毅辉", "en_name": "Muspi", "union_id": "on_1", "employee_no": "42", "mobile": "+8613800000000"}}
-        return {"users": []}
+        return {"items": []}
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -2521,7 +2556,7 @@ def test_the_export_records_which_revision_it_is(tmp_path, monkeypatch):
 
     row = store.read_yaml("docs/tok1/meta.yaml")
     assert row["revision_id"] == 85, "the export said which version it was and nobody wrote it down"
-    assert row["reference_map"] == {"cite": {"u1": {"user_id": "ou_kj"}}}, "the body says `uid-ref=\"u1\"` and only this map says who that is"
+    assert row["reference_map"] == {"cite": {"u1": {"user_id": "ou_kj"}}}, 'the body says `uid-ref="u1"` and only this map says who that is'
     assert (tmp_path / "docs/tok1/content.md").read_text() == "# 方案"
 
 
@@ -2628,8 +2663,8 @@ def test_an_id_search_does_not_know_is_not_asked_every_run(tmp_path, monkeypatch
     async def fake_run(*argv, **_):
         if argv[1] == "+get-user":
             return {"user": {"open_id": "ou_me", "tenant_key": "T"}}
-        asked.append(("left" if "--left-organization" in argv else "all", len(argv[argv.index("--user-ids") + 1].split(","))))
-        return {"users": [] if "--left-organization" in argv else [{"open_id": "ou_real", "localized_name": "Mia(张亚)"}]}
+        asked.append(("left" if _wants_resigned(argv) else "all", len(_asked_ids(argv))))
+        return {"items": [] if _wants_resigned(argv) else [_person("ou_real", "Mia(张亚)")]}
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)

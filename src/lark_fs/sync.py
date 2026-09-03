@@ -666,17 +666,31 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
     p.set("chats", state="done", note=f"{len(known)} chats")
 
 
-# Everything a roster carries about a person beyond their id. `localized_name` is the one
-# that matters: it holds the parenthesised alias that tells two same-named colleagues apart.
-# The last two say things no other endpoint does: whether this person belongs to another
-# tenant, and whether the account we are logged in as has ever talked to them. Of the eleven
-# keys a row carries, the three left out are not facts about the person -- `open_id` is the
-# directory's own name, `match_segments` describes the query, and `chat_recency_hint` renders
-# the current moment ("Contacted today"), so it is false tomorrow and rewrites every file.
-# Whether the person has left is not in the row at all -- `--left-organization` is a filter
-# (`is_resigned: true` in the request), so it is asked as a second query and written beside these.
-PROFILE_FIELDS = ("localized_name", "enterprise_email", "email", "department", "p2p_chat_id", "is_activated", "is_cross_tenant", "has_chatted")
+# The endpoint's own row, not `+search-user`'s. The shortcut picks one locale out of
+# `i18n_names` and drops the rest -- and 28 of this store's 108 resolved people carry a
+# different name in another: 付豪 / Hao Fu, 凌晨 / Ling, 冯欢(Hera) / 冯欢. It drops
+# `tenant_id` too. Everything in `meta_data` lands under its own name. `display_info` does
+# not: its last line renders the current moment ("Contacted yesterday") and would rewrite
+# every file every day, so only the department on its second line is taken from it.
+# `localized_name` is the pick the shortcut made, kept because it is what tells two 冯欢
+# apart at a glance. Whether the person has left is not in the row at all -- `is_resigned` is
+# a request filter -- so it is asked as a second query and written beside these.
+# the shortcut's names for raw fields, stripped so a file does not say one thing twice. Not its two
+# email keys: `authen/v1/user_info` really does call them that, and writes them onto the account we run as
+PROFILE_ALIASES = ("p2p_chat_id", "is_activated", "has_chatted")
 BATCH = 19  # one under the 20-match cap `+search-user` enforces, measured against resolvable ids
+
+
+def _profile(item: dict) -> dict:
+    """One `users/search` row as it is kept: `meta_data` whole, the name the shortcut would pick, the department line."""
+    meta = item.get("meta_data") or {}
+    names = meta.get("i18n_names") or {}
+    lines = (item.get("display_info") or "").split("\n")
+    return {
+        **meta,
+        "localized_name": names.get("zh_cn") or names.get("en_us") or next((v for _, v in sorted(names.items()) if v), item["id"]),
+        "department": lines[1].strip() if len(lines) > 1 else "",
+    }
 
 
 async def sync_profiles(store: Store, p: Progress):
@@ -711,12 +725,12 @@ async def sync_profiles(store: Store, p: Progress):
     # a resolved profile is not a permanent one: an email, a department and an activation
     # state all change, and "localized_name is present" was reading as "done for good"
     stale = not swept_recently(store, "profiles", PROFILE_HOURS)
-    # "no localized_name" is what makes a user asked about between sweeps, so someone met
+    # "no i18n_names" is what makes a user asked about between sweeps, so someone met
     # mid-week is resolved that run rather than the next. But 89 of them are deactivated
     # accounts and bots that resolve to nothing and always will, and with nothing on disk
     # saying they had been asked they were five requests on every single run. The marker is
     # only consulted here: a sweep that is due asks everyone regardless.
-    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and (stale or (("localized_name" not in u or "is_resigned" not in u) and not store.exists(f"users/{oid}/.unresolved")))]
+    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and (stale or ("i18n_names" not in u and not store.exists(f"users/{oid}/.unresolved")))]
     p.set("profiles", total=len(todo), note=f"{len(on_disk)} known")
     if not todo:
         p.set("profiles", state="done", note="up to date")
@@ -724,26 +738,29 @@ async def sync_profiles(store: Store, p: Progress):
 
     resolved, answered = 0, True
 
+    async def search(batch: list[str], **flags) -> list[dict]:
+        body = dumps({"filter": {"user_ids": batch, **flags}})
+        return ((await cli.run("api", "POST", "/open-apis/contact/v3/users/search", "--params", '{"page_size": 30}', "--data", body, "--as", "user")) or {}).get("items") or []
+
     async def one(batch: list[str]):
         nonlocal resolved, answered
-        ids = ",".join(batch)
         try:
-            rows = ((await cli.run("contact", "+search-user", "--user-ids", ids, "--as", "user")) or {}).get("users") or []
-            # Someone who left answers the same row as a colleague, `is_activated: true` included --
+            rows = await search(batch)
+            # Someone who left answers the same row as a colleague, `is_registered: true` included --
             # only the filtered query tells them apart. Both must answer before either is written:
             # a failure here read as "nobody left" would flip every `true` on disk back to `false`.
-            left = {r["open_id"] for r in ((await cli.run("contact", "+search-user", "--user-ids", ids, "--left-organization", "--as", "user")) or {}).get("users") or []} if rows else set()
+            left = {r["id"] for r in await search(batch, is_resigned=True)} if rows else set()
         except cli.LarkError:
             answered = False
             p.bump("profiles", len(batch))  # one batch that would not resolve is not the pass failing
             return
         for row in rows:
-            rel = f"users/{row['open_id']}/meta.yaml"
-            # a roster row is the richer one for name/member_id; only the profile-only fields are taken.
-            # `is_resigned` is written both ways: the file is merged, so a `true` left alone would
-            # outlive the person's return
-            store.write_yaml(rel, _clean({**store.read_yaml(rel), **{k: row[k] for k in PROFILE_FIELDS if k in row}, "is_resigned": row["open_id"] in left}))
-        for oid in set(batch) - {r["open_id"] for r in rows}:
+            rel = f"users/{row['id']}/meta.yaml"
+            # merged over the roster's row, which is the richer one for name/member_id.
+            # `is_resigned` is written both ways: a `true` left alone would outlive the person's return
+            was = {k: v for k, v in store.read_yaml(rel).items() if k not in PROFILE_ALIASES}
+            store.write_yaml(rel, _clean({**was, **_profile(row), "is_resigned": row["id"] in left}))
+        for oid in set(batch) - {r["id"] for r in rows}:
             store.mark(f"users/{oid}/.unresolved")  # asked, and this id is not one search knows
         resolved += len(rows)
         p.bump("profiles", len(batch))
@@ -771,7 +788,16 @@ def _record_sender(store: Store, msg: dict, known: set[str]):
     if not store.exists(rel):
         # `sender_i18n_names` too: for the 15k people outside this tenant, whom `+search-user`
         # will never resolve, a message is the only place their other name is ever written
-        store.write_yaml(rel, {"open_id": oid, "name": sender.get("name", ""), "sender_type": sender.get("sender_type", ""), "tenant_key": sender.get("tenant_key", ""), **({"i18n_names": names} if (names := sender.get("sender_i18n_names")) else {})})
+        store.write_yaml(
+            rel,
+            {
+                "open_id": oid,
+                "name": sender.get("name", ""),
+                "sender_type": sender.get("sender_type", ""),
+                "tenant_key": sender.get("tenant_key", ""),
+                **({"i18n_names": names} if (names := sender.get("sender_i18n_names")) else {}),
+            },
+        )
 
 
 # Drive search returns a ranked slice, not the corpus: an empty query yields far fewer
