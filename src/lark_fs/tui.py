@@ -3,6 +3,7 @@
 from asyncio import CancelledError, Event, Future, create_task, gather, sleep
 from contextlib import suppress
 from itertools import cycle
+from os import scandir
 from re import compile
 from sys import stderr
 from xml.sax.saxutils import escape
@@ -259,22 +260,43 @@ async def run_with_tui(coro_factory, names: list[str] | None = None):
     return result
 
 
+def _messages(root) -> int:
+    """Every message file under every chat, as a plain directory walk.
+
+    A thread's directory also holds its own meta.yaml, which is not a message: the root
+    keeps its own <message_id>.yaml like every other one. 13576 of them on this store, which
+    is what made `status` report 466543 messages where there are 452967.
+
+    Not `glob`: three patterns over 470k files built a Path per match and took a second
+    warm, which after a ctrl-c is a second between "interrupted" and the numbers. Listing
+    the directories and counting names is the same answer in a third of the time.
+    """
+    n = 0
+    for chat in scandir(root / "chats"):
+        for sub in scandir(chat.path):
+            if sub.name not in ("messages", "threads") or not sub.is_dir():
+                continue
+            for d in scandir(sub.path):
+                names = [e.name for e in scandir(d.path)]
+                n += sum(1 for name in names if name.endswith(".yaml")) - (sub.name == "threads" and "meta.yaml" in names)
+    return n
+
+
 def print_summary(store):
-    counts = {
-        "chats": store.count("chats/*"),
-        # a thread's directory also holds its own meta.yaml, which is not a message: the root
-        # keeps its own <message_id>.yaml like every other one. 13576 of them on this store,
-        # which is what made `status` report 466543 messages where there are 452967.
-        "messages": store.count("chats/*/messages/*/*.yaml") + store.count("chats/*/threads/*/*.yaml") - store.count("chats/*/threads/*/meta.yaml"),
-        "users": store.count("users/*"),
-        "docs": store.count("docs/*"),
-        "minutes": store.count("minutes/*"),
-        "meetings": store.count("meetings/*"),
-        "bases": store.count("bases/*"),
-        "wiki": store.count("wiki/*"),
-        "files": store.count("chats/*/files/*/*") - store.count("chats/*/files/*/.oversize"),
-    }
-    width = max(len(k) for k in counts)
+    counts = (
+        ("chats", lambda: store.count("chats/*")),
+        ("messages", lambda: _messages(store.root)),
+        ("users", lambda: store.count("users/*")),
+        ("docs", lambda: store.count("docs/*")),
+        ("minutes", lambda: store.count("minutes/*")),
+        ("meetings", lambda: store.count("meetings/*")),
+        ("bases", lambda: store.count("bases/*")),
+        ("wiki", lambda: store.count("wiki/*")),
+        ("files", lambda: store.count("chats/*/files/*/*") - store.count("chats/*/files/*/.oversize")),
+    )
+    width = max(len(k) for k, _ in counts)
     print(f"  {store.root}", file=stderr)
-    for k, v in counts.items():
-        print(f"  {k:<{width}}  {v}", file=stderr)
+    # one line as each count lands, so the wait after a ctrl-c is spent watching numbers
+    # appear rather than a blank line; only the message count takes long enough to notice
+    for k, count in counts:
+        print(f"  {k:<{width}}  {count()}", file=stderr, flush=True)
