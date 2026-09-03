@@ -1685,9 +1685,16 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
     asked: list[str] = []
 
     async def fake_run(*argv, **_):
-        asked.append(argv[argv.index("--note-id") + 1])
+        asked.append(argv[2].rsplit("/", 1)[1])
         return {
-            "note": {"note_id": "7608565672679836877", "note_doc_token": "NoteDocToken00000000001", "verbatim_doc_token": "VerbatimToken0000000001", "shared_doc_tokens": ["SharedDocToken000000001"]}
+            "note": {
+                "artifacts": [{"artifact_type": 1, "create_time": "1771508960", "doc_token": "NoteDocToken00000000001"}, {"artifact_type": 2, "create_time": "1771508961", "doc_token": "VerbatimToken0000000001"}],
+                "create_time": "1771508960",
+                "creator_id": "ou_pony",
+                "note_display_type": 1,
+                "note_source": {"source_entity_id": "7608548441309498326", "source_type": "meeting"},
+                "references": [{"doc_token": "SharedDocToken000000001", "reference_type": 1}],
+            }
         }
 
     monkeypatch.setattr(cli, "run", fake_run)
@@ -1698,6 +1705,11 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
     assert asked == ["7608565672679836877"]
     for token in ("NoteDocToken00000000001", "VerbatimToken0000000001", "SharedDocToken000000001"):
         assert store.exists(f"docs/{token}/meta.yaml"), f"{token} is a document, and only the note said so"
+    row = store.read_yaml("notes/7608565672679836877.yaml")
+    # the raw row stays whole -- `note_source` names the meeting this note belongs to, and
+    # `+detail` dropped it -- and the three names the shortcut coined are kept beside it
+    assert row["note_source"] == {"source_entity_id": "7608548441309498326", "source_type": "meeting"}, f"the meeting this note came from was lost: {row}"
+    assert row["artifacts"][0]["create_time"] == "1771508960" and row["note_doc_token"] == "NoteDocToken00000000001" and row["shared_doc_tokens"] == ["SharedDocToken000000001"], row
 
     run(_resolve_notes(store, Progress()))
     assert len(asked) == 1, f"the answer is on disk; asking again buys nothing: {asked}"
@@ -1705,7 +1717,7 @@ def test_a_meeting_note_becomes_the_documents_it_is(tmp_path, monkeypatch):
     store.write_yaml("meetings/m2.yaml", {"meeting_id": "m2", "note_id": "7664944480836078831"})
 
     async def denied(*argv, **_):
-        asked.append(argv[argv.index("--note-id") + 1])
+        asked.append(argv[2].rsplit("/", 1)[1])
         raise cli.LarkError(list(argv), {"error": {"code": 121005, "message": "no read permission for this note"}})
 
     monkeypatch.setattr(cli, "run", denied)
@@ -2522,7 +2534,7 @@ def test_a_note_a_minute_names_is_still_found_after_the_merge(tmp_path, monkeypa
     asked: list[str] = []
 
     async def fake_run(*argv, **_):
-        asked.append(argv[argv.index("--note-id") + 1])
+        asked.append(argv[2].rsplit("/", 1)[1])
         return {"note": {"note_id": asked[-1]}}
 
     monkeypatch.setattr(cli, "run", fake_run)

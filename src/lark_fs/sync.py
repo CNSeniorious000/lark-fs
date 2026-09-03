@@ -1497,7 +1497,7 @@ async def _resolve_notes(store: Store, p: Progress):
     """Turn the note a meeting kept into the documents it actually is.
 
     `note_id` is reported by `+detail` and is not a drive token -- nothing can be fetched
-    with it. `note +detail` translates it into two or three that can be: the note itself,
+    with it. `GET /vc/v1/notes/{id}` translates it into two or three that can be: the note itself,
     the verbatim transcript, and whatever was shared into the meeting. None of the 131 notes
     on this store had any of its documents mirrored, because no search ever ranked them.
 
@@ -1515,16 +1515,23 @@ async def _resolve_notes(store: Store, p: Progress):
 
     async def one(note_id: str):
         try:
-            data = await cli.run("note", "+detail", "--note-id", note_id)
+            data = await cli.run("api", "GET", f"/open-apis/vc/v1/notes/{note_id}")
         except cli.LarkError as e:
             if e.is_forbidden:
                 # one note on this store, and unlike a document it will not be shared later:
                 # the meeting is over. Recording the refusal is what stops the daily retry.
                 store.write_yaml(f"notes/{note_id}.yaml", {"note_id": note_id, "forbidden": True})
             return  # anything else is transient: leave it unresolved, the next run asks again
-        note = (data or {}).get("note") or {}
-        store.write_yaml(f"notes/{note_id}.yaml", _clean(note))
-        links.extend((t, "docx") for t in (note.get("note_doc_token"), note.get("verbatim_doc_token"), *(note.get("shared_doc_tokens") or [])) if t)
+        # The endpoint itself, not `note +detail`: the shortcut renames the two artifacts it
+        # recognises to `note_doc_token` / `verbatim_doc_token`, lists the references as
+        # `shared_doc_tokens`, and drops `note_source` -- the meeting this note belongs to,
+        # by id -- along with each artifact's own create_time. The three names it coined are
+        # kept beside the raw row, since two passes and every note on disk already read them.
+        note = _clean((data or {}).get("note") or {})
+        arts = {a.get("artifact_type"): a.get("doc_token") for a in note.get("artifacts") or []}
+        named = {"note_doc_token": arts.get(1), "verbatim_doc_token": arts.get(2), "shared_doc_tokens": [r["doc_token"] for r in note.get("references") or [] if r.get("doc_token")]}
+        store.write_yaml(f"notes/{note_id}.yaml", {"note_id": note_id, **note, **{k: v for k, v in named.items() if v}})
+        links.extend((t, "docx") for t in (named["note_doc_token"], named["verbatim_doc_token"], *named["shared_doc_tokens"]) if t)
 
     await cli.spread(one, todo)
     _flush_doc_links(store, links)
