@@ -2335,7 +2335,9 @@ def test_a_document_no_query_ranked_still_learns_when_it_changed(tmp_path, monke
     assert row["update_time"] == 2000000000, "a document no query ranked never learned that it had changed"
     assert row["owner_id"] == "ou_kj" and row["url"] == "https://x/docx/tok1", "the rest of what the batch answered is not derivable from anywhere else"
     assert (tmp_path / "docs/tok1/content.md").read_text() == "a newer body", "the timestamp moved and the body was not exported again"
-    assert store.read_yaml("docs/nodetok/meta.yaml")["obj_token"] == "objtok", "a wiki token answers as the document it wraps, and that token is worth keeping"
+    wrapped = store.read_yaml("docs/nodetok/meta.yaml")
+    assert wrapped["obj_token"] == "objtok", "a wiki token answers as the document it wraps, and that token is worth keeping"
+    assert wrapped["doc_type"] == "docx", "the kind the token resolved to is the one fact `doc_types: WIKI` cannot say"
 
 
 def test_the_only_text_a_search_hit_carries_is_kept(tmp_path, monkeypatch):
@@ -2496,7 +2498,7 @@ def test_the_export_records_which_revision_it_is(tmp_path, monkeypatch):
         if argv[0] == "api" or argv[1] == "metas":
             return {}
         if argv[1] == "+fetch":
-            return {"document": {"document_id": "tok1", "revision_id": 85, "content": "# 方案"}}
+            return {"document": {"document_id": "tok1", "revision_id": 85, "content": "# 方案", "reference_map": {"cite": {"u1": {"user_id": "ou_kj"}}}}}
         return {"items": []}
 
     monkeypatch.setattr(cli, "run", fake_run)
@@ -2505,7 +2507,9 @@ def test_the_export_records_which_revision_it_is(tmp_path, monkeypatch):
 
     run(sync_module.sync_docs(store, Progress(), search=False))
 
-    assert store.read_yaml("docs/tok1/meta.yaml")["revision_id"] == 85, "the export said which version it was and nobody wrote it down"
+    row = store.read_yaml("docs/tok1/meta.yaml")
+    assert row["revision_id"] == 85, "the export said which version it was and nobody wrote it down"
+    assert row["reference_map"] == {"cite": {"u1": {"user_id": "ou_kj"}}}, "the body says `uid-ref=\"u1\"` and only this map says who that is"
     assert (tmp_path / "docs/tok1/content.md").read_text() == "# 方案"
 
 

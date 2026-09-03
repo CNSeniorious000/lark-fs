@@ -939,8 +939,8 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
         for m in metas:
             token = ((m.get("request_doc_info") or {}).get("doc_token")) or m["doc_token"]
             # `latest_modify_time` is this store's `update_time` under another name, and the
-            # `doc_type` it answers with is the *resolved* kind -- `doc_types` already records
-            # the kind this token has to be addressed by, and for a wiki token they differ.
+            # `doc_type` it answers with is the *resolved* kind -- `doc_types` records the kind
+            # this token has to be addressed by, and for a wiki token they differ, so both stay
             row = {
                 "update_time": int(m["latest_modify_time"]),
                 "create_time": int(m["create_time"]),
@@ -948,6 +948,7 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 "latest_modify_user": m.get("latest_modify_user"),
                 "title": m.get("title"),
                 "url": m.get("url"),
+                "doc_type": m.get("doc_type"),
             }
             if (own := m.get("doc_token")) and own != token:
                 row["obj_token"] = own  # a wiki token answers as the document it wraps, under the name the node lists use
@@ -1013,10 +1014,13 @@ async def sync_docs(store: Store, p: Progress, *, queries: list[str] | None = No
                 data = None
             document = (data or {}).get("document") or {}
             # the export says which revision it is, and nothing else does: `update_time` says
-            # when the server last changed, this says which version is the file on disk
-            if rev := document.get("revision_id"):
+            # when the server last changed, this says which version is the file on disk.
+            # `reference_map` is the other thing only the export carries: the body's
+            # `<cite uid-ref="u2">` and comment refs resolve to an open_id nowhere else, and 166
+            # documents on this store mention people that way
+            if extra := {k: v for k, v in (("revision_id", document.get("revision_id")), ("reference_map", document.get("reference_map"))) if v}:
                 rel = f"docs/{token}/meta.yaml"
-                store.write_yaml(rel, {**store.read_yaml(rel), "revision_id": rev})
+                store.write_yaml(rel, {**store.read_yaml(rel), **extra})
             content = document.get("content")
             if content:
                 # `store.write` leaves the mtime alone when the text is identical, and that
