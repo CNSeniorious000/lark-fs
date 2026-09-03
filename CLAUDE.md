@@ -212,6 +212,10 @@ not one that only shows in a transient state:
   collections get feed lines, so the layout never outgrows the screen. `cli.activity` owns
   that state, keyed by the `cli.current_group` ContextVar each syncer sets on entry.
   In-flight rows stay pinned below finished ones, so a row never jumps as it completes.
+  Heights are levelled, not summed: spare lines go to the shortest block until they are
+  equal, and a block stands taller only while it holds more requests than that level.
+  Giving each block its in-flight count plus a share made every height follow every other
+  block's request count, and the blocks grew and shrank against each other every frame.
 - The TUI repaints from a `@effect` subscribing to a `@derived` view, with
   `refresh_interval=0` — no polling. Create that effect only after `run_async` has
   started: `Application.invalidate()` is a no-op while the app is not running.

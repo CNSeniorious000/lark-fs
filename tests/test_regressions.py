@@ -3137,7 +3137,6 @@ def test_the_search_gate_admits_only_the_search():
     assert gated == [("drive", "+search")], f"the gate admitted the wrong requests: {gated}"
 
 
-
 def test_a_scan_of_the_store_lets_the_loop_turn(tmp_path, monkeypatch):
     """Reading every document meta, or every user file, was one comprehension on the loop:
     2.0s and 3.5s on this store during which no request completed, no row moved, the
@@ -3188,3 +3187,31 @@ def test_a_scan_of_the_store_lets_the_loop_turn(tmp_path, monkeypatch):
         total, widest = run(measure(coro))
         assert total >= 600, f"{name}: the test never reached the scan it is about ({total} reads)"
         assert widest <= 256, f"{name}: {widest} files were read without the loop getting a turn"
+
+
+def test_feed_heights_do_not_follow_the_request_count():
+    """Each running block got its in-flight count plus an equal share of what was left, so
+    every block's height moved with every other block's request count: eight slots shifting
+    between three collections had the blocks growing and shrinking against each other on
+    every frame. Heights should hold while the set of running collections holds."""
+    from lark_fs.tui import _budget
+
+    rows = ["messages", "chats", "profiles", "docs", "minutes", "meetings", "bases", "wiki", "files"]
+    p = Progress()
+    for n in ("messages", "docs", "minutes"):
+        p.set(n, state="running")
+    before = cli.activity.running
+    try:
+        frames = []
+        for busy in ((1, 1, 1), (8, 0, 0), (3, 5, 0), (0, 0, 1)):
+            cli.activity.running = {i * 100 + j: (g, "d", "s") for i, (g, k) in enumerate(zip(("messages", "docs", "minutes"), busy, strict=True)) for j in range(k)}
+            frames.append(_budget(rows, p, 40))
+        assert len({tuple(sorted(f.items())) for f in frames}) == 1, f"the same three collections were laid out four different ways: {frames}"
+        assert sum(frames[0].values()) == 40 - len(rows), "the height was not filled"
+        cli.activity.running = dict.fromkeys(range(20), ("messages", "d", "s"))  # more in flight than an equal share
+        tall = _budget(rows, p, 40)
+        assert tall["messages"] >= 20, f"an in-flight request lost its line: {tall}"
+        assert sum(tall.values()) == 40 - len(rows), f"the layout outgrew the screen: {tall}"
+        assert abs(tall["docs"] - tall["minutes"]) <= 1, f"the two idle blocks were not levelled against each other: {tall}"
+    finally:
+        cli.activity.running = before

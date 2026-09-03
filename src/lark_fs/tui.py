@@ -63,16 +63,21 @@ def _budget(rows: list[str], progress: Progress, height: int) -> dict[str, int]:
     """Hand feed lines to whoever is actually working, filling the terminal.
 
     Every in-flight request is guaranteed a line -- hiding one would misrepresent how much
-    is running -- and whatever height remains is shared out so recent history is visible
-    too. Idle and finished collections collapse to their own summary line.
+    is running -- and the rest of the height is levelled across the running collections:
+    each spare line goes to whichever block is shortest, so they end up equal, and a block
+    only stands taller when it holds more requests than that level. That is what keeps the
+    heights still. Handing each block its in-flight count *plus* an equal share made every
+    block's height follow every other block's request count, and eight slots moving
+    between three collections had them growing and shrinking against each other on every
+    frame. Idle and finished collections collapse to their own summary line.
     """
     active = [n for n in rows if progress.rows.get(n, {}).get("state") == "running"]
     if not active:
         return {}
-    floors = {n: max(1, activity.busy(n)) for n in active}
-    spare = max(0, height - len(rows) - sum(floors.values()))
-    share, extra = divmod(spare, len(active))
-    return {n: floors[n] + share + (1 if i < extra else 0) for i, n in enumerate(active)}
+    heights = {n: max(1, activity.busy(n)) for n in active}
+    for _ in range(max(0, height - len(rows) - sum(heights.values()))):
+        heights[min(active, key=lambda n: (heights[n], active.index(n)))] += 1
+    return heights
 
 
 def _hyperlink(text: str, tone: str) -> list:
