@@ -202,6 +202,7 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
         # half hour, so asking there would quadruple the daemon's steady cost forever.
         argv = ["im", "+chat-messages-list", "--chat-id", chat_id, "--order", "asc", *(["--start", start] if start else []), *(["--end", end] if end else [])]
         newest, seen = "", 0
+        answering: list[tuple[str, str]] = []
         # this loop returns early once `limit` is reached, and the generator holds a
         # prefetched page in flight -- without aclosing that request is paid for, thrown
         # away, and its cleanup deferred to garbage collection
@@ -212,20 +213,26 @@ async def sync_messages(store: Store, p: Progress, *, chat_ids: set[str] | None 
                 created = msg.get("create_time", "")
                 if thread := msg.get("thread_id"):
                     written = _write_thread(store, chat_id, thread, msg)
+                    at = f"chats/{chat_id}/threads/{thread}"
                 else:
                     store.write_yaml(f"chats/{chat_id}/messages/{created[:7] or 'unknown'}/{mid}.yaml", _clean(msg))
                     written = [msg]
+                    at = f"chats/{chat_id}/messages/{created[:7] or 'unknown'}"
                 for one_msg in written:  # a thread arrives as one item but is many messages
                     media.extend(_index_media(one_msg))
                     links.extend(_doc_links(str(one_msg.get("content") or "")))
                     _record_sender(store, one_msg, users)
+                    if _may_answer(one_msg, in_thread=bool(thread)):
+                        answering.append((one_msg["message_id"], f"{at}/{one_msg['message_id']}.yaml"))
                 total += len(written)
                 newest = max(newest, created)
                 if total % 20 == 0:
                     sender = (msg.get("sender") or {}).get("name") or ""
                     p.set("messages", last=f"{sender}: {cli.oneline(msg.get('content'), 40)}", note=f"{total} messages")
                 if limit and (seen := seen + 1) >= limit:
+                    await _link_replies(store, answering)
                     return newest, True
+        await _link_replies(store, answering)
         return newest, False
 
     async def one(chat_id: str):
@@ -413,6 +420,55 @@ def _flush_doc_links(store: Store, links: list[tuple[str, str]]):
         store.write_yaml(f"docs/{token}/meta.yaml", {"token": token, "doc_types": kind.upper(), **({"comment_type": "wiki"} if kind == "wiki" else {})})
 
 
+# What a message answers, and the one thing the shortcuts cannot say. Their conversion
+# writes `reply_to` (= parent_id) and only when the message is *not* in a thread, so a
+# chain's root is dropped for every reply and its parent for every threaded one: 79 of 309
+# replies in one real chat answer something that is not the root of their chain, and none of
+# the 70266 thread replies on disk records what it answers at all. `+messages-mget` runs the
+# same conversion, so the raw endpoint is the only place either field survives.
+REPLY_LINKS = ("root_id", "parent_id")
+
+
+def _may_answer(msg: dict, *, in_thread: bool = False) -> bool:
+    """Whether Lark could have a reply link for this message, i.e. whether asking is worth a slot.
+
+    A message outside a thread that answers nothing has both fields null, and that is most
+    of the corpus -- 21% qualify here. `reply_to` is the shortcut's own name for a parent
+    outside a thread, so its presence already proves a link exists.
+
+    `in_thread` has to be passed rather than read off the message: an inlined reply carries
+    no `thread_id` of its own -- only the root it arrived nested inside does -- so reading
+    the field skipped every one of the 70266 replies on disk, which is exactly the set with
+    nothing else to say what it answers.
+    """
+    return in_thread or bool(msg.get("thread_id") or msg.get("reply_to"))
+
+
+MGET = 50  # ids per `GET /im/v1/messages/mget`; one malformed id rejects the whole batch, so only ids Lark itself returned go in
+
+
+async def _link_replies(store: Store, queued: list[tuple[str, str]]):
+    """Record what each of these messages answers. Takes (message_id, path) pairs.
+
+    Asked only for messages that can carry a link -- a reply, or a member of a thread, 21%
+    of the corpus -- because for everything else both fields are null and a request would
+    learn nothing. A thread root is in that 21% and answers with neither; writing nothing
+    for it is the honest result, not a gap.
+
+    Raising is deliberate. A caller must not move its cursor past messages whose place in a
+    conversation was never recorded: nothing walks them again.
+    """
+    for i in range(0, len(queued), MGET):
+        chunk = queued[i : i + MGET]
+        params = dumps({"message_ids": [mid for mid, _ in chunk]})  # a JSON array, not the CSV the shortcut takes -- a comma-joined string is rejected as one malformed id
+        data = await cli.run("api", "GET", "/open-apis/im/v1/messages/mget", "--params", params, subject=f"reply-links {len(chunk)}") or {}
+        rows = {m["message_id"]: m for m in data.get("items") or []}
+        for mid, rel in chunk:
+            row = rows.get(mid) or {}
+            if links := {k: row[k] for k in REPLY_LINKS if row.get(k)}:
+                store.write_yaml(rel, {**store.read_yaml(rel), **links})
+
+
 def _thread_meta(root: dict, replies: list[dict]) -> dict:
     """The thread's own identity, so the directory is not merely a bag of messages.
 
@@ -554,10 +610,14 @@ async def repair_thread(store: Store, thread: str, chat: str) -> list[dict]:
     at = f"chats/{chat}/threads/{thread}"
     try:
         replies = [m async for m in cli.paginate("im", "+threads-messages-list", "--thread", thread, key="messages") if m.get("message_id")]
+        for r in replies:
+            store.write_yaml(f"{at}/{r['message_id']}.yaml", _clean(r))
+        # every reply here is in a thread, so every one of them answers something -- and this
+        # path is the only writer for a thread past the inline cap. Inside the `try` because
+        # its failure means the same thing the listing's does: leave the thread queued.
+        await _link_replies(store, [(r["message_id"], f"{at}/{r['message_id']}.yaml") for r in replies])
     except cli.LarkError:
         return []
-    for r in replies:
-        store.write_yaml(f"{at}/{r['message_id']}.yaml", _clean(r))
     if not replies:
         # An empty answer is the failure the caller already reads it as. Writing meta here
         # anyway set `replies: 0, has_more: False` over a count that was right, left the
@@ -588,6 +648,9 @@ async def repair_unreadable(store: Store, chunk: list[tuple[str, str]]) -> list[
         if msg := returned.get(mid):
             store.write_yaml(rel, _clean(msg))
             written.append(msg)
+    # a repaired message has to be as complete as a freshly walked one, and the walk records
+    # what a message answers
+    await _link_replies(store, [(m["message_id"], rel) for (mid, rel), m in ((c, returned.get(c[0])) for c in chunk) if m and _may_answer(m)])
     return written
 
 

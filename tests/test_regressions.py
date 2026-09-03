@@ -2830,3 +2830,145 @@ def test_a_refused_lookup_is_not_recorded_as_an_answer(tmp_path, monkeypatch):
     run(sync_module.sync_docs(store, Progress(), search=False))
 
     assert not store.exists("docs/tok1/.notimestamp"), "a request that never got an answer was recorded as one"
+
+
+def test_a_reply_records_what_it_answers(tmp_path, monkeypatch):
+    """The message shortcuts run a conversion that writes `reply_to` (= parent_id) and only
+    when the message is *not* in a thread. So a chain's root is dropped for every reply --
+    79 of 309 replies in one real chat answer something that is not the root of their chain
+    -- and a threaded reply records nothing at all, across all 70266 of them on disk.
+
+    `+messages-mget` runs that same conversion, so the raw endpoint is the only place either
+    field survives."""
+    from lark_fs import sync as sync_module
+
+    msg = {"message_id": "om_2", "chat_id": "oc_1", "create_time": "2026-08-30 10:00", "content": "and another thing", "reply_to": "om_1"}
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+chat-list":
+            return {"chats": []}
+        assert argv[:2] == ("api", "GET") and argv[2].endswith("/im/v1/messages/mget"), f"the links came from somewhere other than the raw endpoint: {argv}"
+        assert loads(argv[argv.index("--params") + 1])["message_ids"] == ["om_2"], f"asked for the wrong ids: {argv}"
+        return {"items": [{"message_id": "om_2", "root_id": "om_root", "parent_id": "om_1"}]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([msg]))
+    store = Store(tmp_path)
+
+    run(sync_module.sync_messages(store, Progress(), chat_ids={"oc_1"}))
+
+    row = store.read_yaml("chats/oc_1/messages/2026-08/om_2.yaml")
+    assert row["root_id"] == "om_root", f"the root of the chain this message belongs to was dropped: {row}"
+    assert row["parent_id"] == "om_1", f"what it directly answers was dropped: {row}"
+
+
+def test_a_message_that_answers_nothing_costs_no_request(tmp_path, monkeypatch):
+    """Both fields are null for a message outside a thread that answers nothing, and that is
+    most of the corpus -- only 21% here can carry a link. Asking for the rest would double
+    the walk's request count to learn nothing."""
+    from lark_fs import sync as sync_module
+
+    asked: list[tuple] = []
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+chat-list":
+            return {"chats": []}
+        asked.append(argv)
+        return {"items": []}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"message_id": "om_1", "chat_id": "oc_1", "create_time": "2026-08-30 10:00", "content": "hello"}]))
+
+    run(sync_module.sync_messages(Store(tmp_path), Progress(), chat_ids={"oc_1"}))
+
+    assert asked == [], f"a message that cannot answer anything was asked about anyway: {asked}"
+
+
+def test_a_thread_reply_records_what_it_answers(tmp_path, monkeypatch):
+    """A threaded reply is where the shortcut says the least: it writes `reply_to` only when
+    there is no thread, so every one of the 70266 replies on disk records nothing. Two of 25
+    real threads sampled are nested -- a reply answering another reply, not the root -- so
+    the thread id alone does not reconstruct it."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+chat-list":
+            return {"chats": []}
+        ids = loads(argv[argv.index("--params") + 1])["message_ids"]
+        return {"items": [{"message_id": m, "root_id": "om_root", "parent_id": "om_r1" if m == "om_r2" else "om_root"} for m in ids]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([_nested_thread()]))
+
+    store = Store(tmp_path)
+    run(sync_module.sync_messages(store, Progress(), chat_ids={"oc_1"}))
+
+    deep = store.read_yaml("chats/oc_1/threads/omt_1/om_r2.yaml")
+    assert deep["parent_id"] == "om_r1", f"a reply to a reply reads as a reply to the root: {deep}"
+    assert deep["root_id"] == "om_root"
+
+
+def test_a_repaired_thread_is_as_complete_as_a_walked_one(tmp_path, monkeypatch):
+    """Past the inline cap this path is the *only* writer a reply ever gets -- the sweep's
+    cursor has moved beyond that chat. A link the walk records and the repair does not is a
+    field 50-plus replies of every truncated thread never receive."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        ids = loads(argv[argv.index("--params") + 1])["message_ids"]
+        return {"items": [{"message_id": m, "root_id": "om_root", "parent_id": "om_root"} for m in ids]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"message_id": "om_r9", "create_time": "2026-08-04 22:29", "content": "late reply"}]))
+
+    store = Store(tmp_path)
+    run(sync_module.repair_thread(store, "omt_1", "oc_1"))
+
+    row = store.read_yaml("chats/oc_1/threads/omt_1/om_r9.yaml")
+    assert row["content"] == "late reply", "the test never reached the repair's own write"
+    assert row["root_id"] == "om_root", f"a reply only this path will ever write lost what it answers: {row}"
+
+
+def test_a_failed_link_lookup_does_not_move_the_cursor_past_it(tmp_path, monkeypatch):
+    """Nothing walks a message twice: the cursor moves and the sweep never returns. So a
+    lookup that failed must not be recorded as "this message answers nothing" -- the same
+    rule the media index already follows, one level further in."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+chat-list":
+            return {"chats": []}
+        raise cli.LarkError(list(argv), {"error": {"code": 99991400, "message": "rate limit"}})
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli, "paginate", lambda *_a, **_k: _aiter([{"message_id": "om_2", "chat_id": "oc_1", "create_time": "2026-08-30 10:00", "content": "x", "reply_to": "om_1"}]))
+
+    store = Store(tmp_path)
+    run(sync_module.sync_messages(store, Progress(), chat_ids={"oc_1"}))
+
+    assert store.exists("chats/oc_1/messages/2026-08/om_2.yaml"), "the test never reached the write it is about"
+    assert not store.cursors.get("chats", {}).get("oc_1"), f"the cursor moved past a message whose place in the conversation was never recorded: {store.cursors}"
+
+
+def test_a_rewritten_unreadable_file_is_as_complete_as_a_walked_one(tmp_path, monkeypatch):
+    """This path rewrites a file the mirror can no longer parse, and it is the last writer
+    that message ever gets -- `reindex` queued it precisely because the sweep will not pass
+    it again. A field the walk records and this rewrite does not is lost for good."""
+    from lark_fs import sync as sync_module
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+messages-mget":
+            return {"messages": [{"message_id": "om_2", "chat_id": "oc_1", "content": "recovered", "reply_to": "om_1"}]}
+        ids = loads(argv[argv.index("--params") + 1])["message_ids"]
+        assert ids == ["om_2"], f"asked for the wrong ids: {ids}"
+        return {"items": [{"message_id": "om_2", "root_id": "om_root", "parent_id": "om_1"}]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    rel = "chats/oc_1/messages/2026-08/om_2.yaml"
+
+    run(sync_module.repair_unreadable(store, [("om_2", rel)]))
+
+    row = store.read_yaml(rel)
+    assert row["content"] == "recovered", "the test never reached the rewrite it is about"
+    assert row["root_id"] == "om_root", f"the rewrite left out what the walk would have recorded: {row}"

@@ -50,6 +50,19 @@ Known traps, all hit in practice:
   sliced — it cannot mirror a conversation. `im +chat-messages-list` has no such ceiling
   and reaches the first message in a chat (2020 vs 2026-07 on the same chat), so messages
   are walked per chat with a cursor each, never through search.
+- every message shortcut runs one conversion, and it drops what a message *answers*:
+  `reply_to` is written only when there is no `thread_id`, so a threaded reply records
+  nothing at all, and `root_id` — the head of the chain — is dropped for all of them. Not
+  cosmetic: 79 of 309 replies in one real chat answer something that is not their chain's
+  root, and 2 of 25 real threads nest a reply under another reply. `+messages-mget` runs the
+  same conversion, so `GET /im/v1/messages/mget` (a JSON *array* in `--params`, never the
+  shortcut's CSV, which is rejected as one malformed id) is the only place either survives.
+  Asked only for the 21% that can carry a link — for anything else both fields are null.
+- the chat container never returns thread replies, whatever `only_thread_root_messages`
+  says: true, false and omitted all answer identically (measured over the same window).
+  Replies exist only inside their root's inlined `thread_replies` or through the thread
+  container, and an inlined one carries no `thread_id` of its own — only the root does, so
+  code that reads that field off a reply silently skips every one of them.
 - Page-size ceilings differ per endpoint (50 for chat listing, 30 for `vc`/`minutes`
   search); `paginate` reads the cap out of the rejection and retries, so call sites do
   not carry the number.
