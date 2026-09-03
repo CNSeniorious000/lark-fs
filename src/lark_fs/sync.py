@@ -669,6 +669,8 @@ async def sync_chat_meta(store: Store, p: Progress, chat_ids: set[str]):
 # keys a row carries, the three left out are not facts about the person -- `open_id` is the
 # directory's own name, `match_segments` describes the query, and `chat_recency_hint` renders
 # the current moment ("Contacted today"), so it is false tomorrow and rewrites every file.
+# Whether the person has left is not in the row at all -- `--left-organization` is a filter
+# (`is_resigned: true` in the request), so it is asked as a second query and written beside these.
 PROFILE_FIELDS = ("localized_name", "enterprise_email", "email", "department", "p2p_chat_id", "is_activated", "is_cross_tenant", "has_chatted")
 BATCH = 19  # one under the 20-match cap `+search-user` enforces, measured against resolvable ids
 
@@ -710,7 +712,7 @@ async def sync_profiles(store: Store, p: Progress):
     # accounts and bots that resolve to nothing and always will, and with nothing on disk
     # saying they had been asked they were five requests on every single run. The marker is
     # only consulted here: a sweep that is due asks everyone regardless.
-    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and (stale or ("localized_name" not in u and not store.exists(f"users/{oid}/.unresolved")))]
+    todo = [oid for oid, u in on_disk.items() if u.get("tenant_key") == tenant and (stale or (("localized_name" not in u or "is_resigned" not in u) and not store.exists(f"users/{oid}/.unresolved")))]
     p.set("profiles", total=len(todo), note=f"{len(on_disk)} known")
     if not todo:
         p.set("profiles", state="done", note="up to date")
@@ -720,17 +722,23 @@ async def sync_profiles(store: Store, p: Progress):
 
     async def one(batch: list[str]):
         nonlocal resolved, answered
+        ids = ",".join(batch)
         try:
-            d = await cli.run("contact", "+search-user", "--user-ids", ",".join(batch), "--as", "user") or {}
+            rows = ((await cli.run("contact", "+search-user", "--user-ids", ids, "--as", "user")) or {}).get("users") or []
+            # Someone who left answers the same row as a colleague, `is_activated: true` included --
+            # only the filtered query tells them apart. Both must answer before either is written:
+            # a failure here read as "nobody left" would flip every `true` on disk back to `false`.
+            left = {r["open_id"] for r in ((await cli.run("contact", "+search-user", "--user-ids", ids, "--left-organization", "--as", "user")) or {}).get("users") or []} if rows else set()
         except cli.LarkError:
             answered = False
             p.bump("profiles", len(batch))  # one batch that would not resolve is not the pass failing
             return
-        rows = d.get("users") or []
         for row in rows:
             rel = f"users/{row['open_id']}/meta.yaml"
-            # a roster row is the richer one for name/member_id; only the profile-only fields are taken
-            store.write_yaml(rel, _clean({**store.read_yaml(rel), **{k: row[k] for k in PROFILE_FIELDS if k in row}}))
+            # a roster row is the richer one for name/member_id; only the profile-only fields are taken.
+            # `is_resigned` is written both ways: the file is merged, so a `true` left alone would
+            # outlive the person's return
+            store.write_yaml(rel, _clean({**store.read_yaml(rel), **{k: row[k] for k in PROFILE_FIELDS if k in row}, "is_resigned": row["open_id"] in left}))
         for oid in set(batch) - {r["open_id"] for r in rows}:
             store.mark(f"users/{oid}/.unresolved")  # asked, and this id is not one search knows
         resolved += len(rows)

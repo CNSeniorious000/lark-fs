@@ -426,6 +426,8 @@ def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
         if argv[1] == "+get-user":
             return {"user": {"tenant_key": "T"}}
         ids = argv[argv.index("--user-ids") + 1].split(",")
+        if "--left-organization" in argv:
+            ids = [i for i in ids if i == "ou_2"]
         return {
             "users": [
                 {"open_id": i, "name": "", "localized_name": "Mia(张亚)", "chat_recency_hint": "Contacted today", "match_segments": [], "has_chatted": True, "is_cross_tenant": True} for i in ids
@@ -435,6 +437,7 @@ def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
     store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "member_id": "ou_1", "name": "张亚", "tenant_key": "T"})
+    store.write_yaml("users/ou_2/meta.yaml", {"open_id": "ou_2", "member_id": "ou_2", "name": "张亚", "tenant_key": "T"})
 
     run(sync_module.sync_profiles(store, Progress()))
 
@@ -443,6 +446,66 @@ def test_a_profile_row_is_filtered_before_it_lands(tmp_path, monkeypatch):
     assert got["name"] == "张亚" and got["member_id"] == "ou_1", f"the roster's own fields were overwritten: {got}"
     assert got["has_chatted"] is True and got["is_cross_tenant"] is True, f"two facts nothing else reports were dropped: {got}"
     assert not {"chat_recency_hint", "match_segments"} & got.keys(), f"a rendering of now landed on disk: {got}"
+    # the one fact the row does not carry: the filtered query is what says who left, and its
+    # absence has to be written too, or nothing on disk ever says a person is still here
+    assert got["is_resigned"] is False, f"a colleague still here was not written as such: {got}"
+    assert store.read_yaml("users/ou_2/meta.yaml")["is_resigned"] is True, "the person the filter returned was not marked as having left"
+
+
+def test_a_person_who_left_and_came_back_is_no_longer_marked_as_gone(tmp_path, monkeypatch):
+    """`meta.yaml` is merged, not replaced, so a `true` written once would outlive the person's
+    return unless the next sweep writes `false` over it. Only writing the positive case reads as
+    correct on every store where nobody has been rehired."""
+    from lark_fs import sync as sync_module
+
+    left: set[str] = {"ou_1"}
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+get-user":
+            return {"user": {"tenant_key": "T"}}
+        ids = argv[argv.index("--user-ids") + 1].split(",")
+        if "--left-organization" in argv:
+            ids = [i for i in ids if i in left]
+        return {"users": [{"open_id": i, "localized_name": "Mia(张亚)"} for i in ids]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "tenant_key": "T"})
+
+    run(sync_module.sync_profiles(store, Progress()))
+    assert store.read_yaml("users/ou_1/meta.yaml")["is_resigned"] is True
+
+    left.clear()  # rehired
+    store.cursors.pop("swept", None)  # the weekly sweep is what re-asks about a resolved profile
+    run(sync_module.sync_profiles(store, Progress()))
+    assert store.read_yaml("users/ou_1/meta.yaml")["is_resigned"] is False, "the `true` from before the return was left standing"
+
+
+def test_a_filtered_query_that_failed_does_not_read_as_nobody_left(tmp_path, monkeypatch):
+    """The plain query succeeded and the `--left-organization` one was rate-limited. Read as an
+    empty filter result, that batch writes `is_resigned: false` over every person in it and the
+    pass claims its week -- ten people who left become colleagues again until the next sweep,
+    a week later. Nothing from that batch may land, and the week stays unclaimed."""
+    from lark_fs import sync as sync_module
+    from lark_fs.sync import PROFILE_HOURS, swept_recently
+
+    async def fake_run(*argv, **_):
+        if argv[1] == "+get-user":
+            return {"user": {"tenant_key": "T"}}
+        if "--left-organization" in argv:
+            raise cli.LarkError(list(argv), {"error": {"code": 99991400}})
+        return {"users": [{"open_id": "ou_1", "localized_name": "Mia(张亚)"}]}
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    store = Store(tmp_path)
+    store.write_yaml("users/ou_1/meta.yaml", {"open_id": "ou_1", "tenant_key": "T", "is_resigned": True})
+    store.write_yaml("users/ou_bot/meta.yaml", {"open_id": "ou_bot", "tenant_key": "T"})
+
+    run(sync_module.sync_profiles(store, Progress()))
+
+    assert store.read_yaml("users/ou_1/meta.yaml")["is_resigned"] is True, "a failed request was written down as an answer"
+    assert not store.exists("users/ou_bot/.unresolved"), "an id was recorded as unknown to search when the batch never finished being asked"
+    assert not swept_recently(store, "profiles", PROFILE_HOURS), "a pass that got no answer claimed the week anyway"
 
 
 def test_a_discovery_pass_coasts_but_an_explicit_request_never_does(tmp_path):
@@ -2508,13 +2571,13 @@ def test_an_id_search_does_not_know_is_not_asked_every_run(tmp_path, monkeypatch
     asked -- five requests on every single run, reporting `0/89 resolved` each time."""
     from lark_fs import sync as sync_module
 
-    asked: list[int] = []
+    asked: list[tuple[str, int]] = []
 
     async def fake_run(*argv, **_):
         if argv[1] == "+get-user":
             return {"user": {"open_id": "ou_me", "tenant_key": "T"}}
-        asked.append(len(argv[argv.index("--user-ids") + 1].split(",")))
-        return {"users": [{"open_id": "ou_real", "localized_name": "Mia(张亚)"}]}
+        asked.append(("left" if "--left-organization" in argv else "all", len(argv[argv.index("--user-ids") + 1].split(","))))
+        return {"users": [] if "--left-organization" in argv else [{"open_id": "ou_real", "localized_name": "Mia(张亚)"}]}
 
     monkeypatch.setattr(cli, "run", fake_run)
     store = Store(tmp_path)
@@ -2522,7 +2585,7 @@ def test_an_id_search_does_not_know_is_not_asked_every_run(tmp_path, monkeypatch
         store.write_yaml(f"users/{oid}/meta.yaml", {"open_id": oid, "tenant_key": "T"})
 
     run(sync_module.sync_profiles(store, Progress()))  # three: the account we run as gets a file of its own
-    assert asked == [3], f"the first pass has to ask about all of them: {asked}"
+    assert asked == [("all", 3), ("left", 3)], f"the first pass has to ask about all of them, both ways: {asked}"
     assert store.exists("users/ou_bot/.unresolved"), "nothing recorded that the id had been asked"
 
     asked.clear()
@@ -2532,7 +2595,7 @@ def test_an_id_search_does_not_know_is_not_asked_every_run(tmp_path, monkeypatch
     store.cursors.pop("swept", None)  # the weekly sweep asks everyone regardless -- the marker only gates the days in between
     asked.clear()
     run(sync_module.sync_profiles(store, Progress()))
-    assert asked == [3], f"the sweep that is due has to ask everyone: {asked}"
+    assert asked == [("all", 3), ("left", 3)], f"the sweep that is due has to ask everyone: {asked}"
 
 
 def test_a_token_the_metas_batch_refused_is_asked_the_other_way(tmp_path, monkeypatch):
