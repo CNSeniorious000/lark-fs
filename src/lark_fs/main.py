@@ -7,7 +7,7 @@ from pathlib import Path
 from signal import SIGINT, SIGTERM, signal
 from sys import stderr
 
-from .cli import Aborted, SyncAbortedError
+from .abort import Aborted, SyncAbortedError
 from .daemon import Schedule, watch
 from .reindex import reindex
 from .store import Store

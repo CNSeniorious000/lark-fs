@@ -124,7 +124,7 @@ handles this — verify any renderer change with `yaml.safe_load` over a real sy
 ## Hot reload (hmr.py)
 
 `uv run hmr.py <command>` reloads edited code into the running command -- `m sync` and
-`m lark-watch` both go through it. Five things must hold, and
+`m lark-watch` both go through it. Seven things must hold, and
 each fails silently on its own — verify with a marker that appears on *every* feed line,
 not one that only shows in a transient state:
 
@@ -142,6 +142,24 @@ not one that only shows in a transient state:
   flight built its closures from the old ones. The `post_reload` hook ends that cycle so
   the loop starts a new one. Ctrl-C raises the *same* exception as that abort, so the
   hook's flag is the only way to tell them apart — conflate them and the app cannot quit.
+- The stop contract cannot live in a reloaded module. A reload re-executes a file, so every
+  `class` in it becomes a *new* object, and `except` matches on identity: an abort raised
+  moments before the reload no longer matches the handler and escapes as a traceback (it did,
+  out of `profiles` awaiting `rosters`). The same re-execution resets `Aborted.flag` and
+  `.reason` to their literals, un-aborting a stopping sync and downgrading the tenant's
+  monthly-quota stop to "rerun to resume" — advice that cannot work until the 1st.
+  `abort.py` holds both and is passed to the reloader's `excludes`; renaming that file
+  silently restores the bug. A stop with a reason takes precedence over a reload; otherwise
+  the next cycle clears its flag and resumes against an exhausted monthly quota.
+- Each cycle is its own `asyncio.run`, and asyncio binds a primitive to the loop that first
+  *contends* on it, not the one that built it. A reload re-executes only the changed files,
+  so `cli`'s semaphore survives into the next cycle still bound to the dead loop and every
+  request fails with "bound to a different event loop". Rebuild that state at the top of each
+  cycle. Keep the rate gate's timestamps when rebuilding it: the requests still count
+  against the same rolling minute. Initialize only on first import: re-executing `cli.py`
+  mid-cycle must not replace locks while requests still hold their old slots. The reset
+  belongs after the old cycle has ended. `tests/test_hmr_entry.py` checks the actual entry in isolated
+  copies, including reloads, preserved budgets, terminal stops and Ctrl-C through the TUI.
 
 ## Invariants
 

@@ -20,8 +20,8 @@ from typing import Any
 from reactivity import reactive
 
 from . import cli
+from .abort import Aborted, SyncAbortedError
 from .attachments import sync_attachments
-from .cli import Aborted, SyncAbortedError
 from .store import Store
 
 TZ = "+08:00"

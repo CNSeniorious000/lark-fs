@@ -1,18 +1,22 @@
 """Regressions for failures that were silent -- each one shipped and produced plausible output."""
 
-from asyncio import Semaphore, create_task, gather, run, sleep
+from asyncio import create_task, gather, run, sleep
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from itertools import pairwise
 from json import loads
 from os import utime
+from pathlib import Path
+from subprocess import run as subprocess_run
+from sys import executable
+from textwrap import dedent
 from time import monotonic
 
 import pytest
 from yaml import safe_load
 
-from lark_fs import cli
+from lark_fs import abort, cli
 from lark_fs.attachments import Policy, _pending, _settle
 from lark_fs.reindex import reindex
 from lark_fs.store import Store
@@ -39,7 +43,7 @@ def _schedule(mode: str, seconds: float = 1.5) -> dict[str, int]:
 
     async def main():
         done = dict.fromkeys(work, 0)
-        cli._sem = Semaphore(cli.CONCURRENCY)  # noqa: SLF001
+        cli.reset_loop_state()
 
         async def unit(group: str):
             async with cli._sem:  # noqa: SLF001
@@ -1393,7 +1397,7 @@ def test_a_deliberate_stop_still_stops(tmp_path, monkeypatch):
     from lark_fs import sync as sync_module
 
     async def stopped(*_a, **_k):
-        raise cli.SyncAbortedError
+        raise abort.SyncAbortedError
 
     async def fine(*_a, **_k):
         return None
@@ -1404,7 +1408,7 @@ def test_a_deliberate_stop_still_stops(tmp_path, monkeypatch):
     for name in ("sync_messages", "sync_chat_meta", "sync_profiles", "sync_docs", "sync_minutes", "sync_meetings", "sync_wiki", "sync_attachments"):
         monkeypatch.setattr(sync_module, name, fine)
 
-    with pytest.raises(cli.SyncAbortedError):
+    with pytest.raises(abort.SyncAbortedError):
         run(sync_module.sync_all(tmp_path, Progress()))
 
 
@@ -3215,3 +3219,133 @@ def test_feed_heights_do_not_follow_the_request_count():
         assert abs(tall["docs"] - tall["minutes"]) <= 1, f"the two idle blocks were not levelled against each other: {tall}"
     finally:
         cli.activity.running = before
+
+
+# `inline` puts the contract in the module that gets edited, which is where it lived before
+# abort.py existed; `pinned` imports it from its own excluded file, which is the fix. The
+# two arms are the revert check: a reload only rebinds a class it re-executes, so a probe
+# that never re-executes the class passes either way and proves nothing.
+_PINNED = "VERSION = 1\n\nfrom .abort import Aborted, SyncAbortedError  # noqa: E402, F401\n"
+_INLINE = 'VERSION = 1\n\n\nclass SyncAbortedError(Exception):\n    pass\n\n\nclass Aborted:\n    flag = False\n    reason = ""\n'
+
+
+def _hmr_probe(tmp_path, body: str, *, pinned: bool) -> str:
+    """Run `body` under a real reloader configured the way hmr.py configures one, editing the
+    watched module mid-run so a real reload fires. None of this is mockable: the bug is what
+    a reload does to class identity, and a simulated reload reproduces none of it."""
+    src = tmp_path / "src"
+    (src / "pkg").mkdir(parents=True)
+    (src / "pkg" / "__init__.py").write_text("")
+    (src / "pkg" / "abort.py").write_text(Path(abort.__file__).read_text())
+    (src / "pkg" / "cli.py").write_text(_PINNED if pinned else _INLINE)  # stands in for cli.py
+    (tmp_path / "entry.py").write_text("from pkg import abort, cli  # noqa: F401\n")
+    prelude = """
+import sys, time
+from pathlib import Path
+from importlib import import_module
+HERE = Path(__file__).parent
+SRC = str(HERE / "src")
+sys.path.insert(0, SRC)
+from reactivity.hmr import post_reload
+from reactivity.hmr.api import SyncReloaderAPI
+reloaded = []
+with SyncReloaderAPI(str(HERE / "entry.py"), includes=[SRC], excludes=[str(Path(SRC) / "pkg" / "abort.py")]):
+    abort, cli = import_module("pkg.abort"), import_module("pkg.cli")
+
+    @post_reload
+    def _hook():
+        reloaded.append(True)
+
+    def reload_now():
+        f = Path(SRC) / "pkg" / "cli.py"
+        edited = f.read_text().replace("VERSION = 1", "VERSION = 2")
+        # the watcher runs on its own thread and may not be up yet, so keep re-touching the file
+        # rather than sleeping a guessed interval first; a duplicate reload costs this probe nothing
+        for _ in range(400):
+            f.write_text(edited)
+            if reloaded:
+                break
+            time.sleep(0.02)
+        assert reloaded, "the reload never fired -- without one this proves nothing"
+        # reading through the module triggers the pending re-execution, so this also settles it
+        assert cli.VERSION == 2, "the reload fired but the edit did not land"
+"""
+    probe = tmp_path / "probe.py"
+    probe.write_text(prelude + "".join(f"    {line}\n" for line in dedent(body).strip().splitlines()))
+    r = subprocess_run([executable, str(probe)], capture_output=True, text=True, cwd=str(tmp_path), timeout=180, check=False)
+    assert r.returncode == 0, f"probe exited {r.returncode}:\n{r.stdout}\n{r.stderr[-2000:]}"
+    return r.stdout
+
+
+BODY = """
+held = cli.SyncAbortedError("raised before the reload")
+cli.Aborted.flag = True
+cli.Aborted.reason = "monthly quota"
+reload_now()
+print("caught:", isinstance(held, cli.SyncAbortedError))
+print("state:", cli.Aborted.flag, repr(cli.Aborted.reason))
+"""
+
+
+@pytest.mark.parametrize(("pinned", "want"), [(True, ["caught: True", "state: True 'monthly quota'"]), (False, ["caught: False", "state: False ''"])])
+def test_a_reload_does_not_break_the_abort_contract(tmp_path, pinned, want):
+    """Both halves of one reload. `SyncAbortedError` lived in cli.py, which hot-reloads: a reload
+    rebinds the class, so an abort raised just before it carries the *old* one and hmr.py's
+    `except` does not match -- a routine edit printed a traceback out of `profiles` awaiting
+    `rosters` instead of restarting. The same re-execution reset `flag` and `reason`, and the
+    monthly quota (99991403) is the one stop no rerun can clear until the 1st, so losing that
+    string printed "rerun to resume", the one answer that cannot work. The False arm is the
+    revert: with both back in the reloaded module the same probe must fail, or nothing is
+    verified."""
+    out = _hmr_probe(tmp_path, BODY, pinned=pinned)
+    for line in want:
+        assert line in out, f"pinned={pinned}: expected {line}\n{out}"
+
+
+def test_reset_loop_state_unbinds_the_primitives_from_a_dead_loop():
+    """hmr.py runs each cycle in its own `asyncio.run`, and asyncio binds a Semaphore to
+    the loop that first *contends* on it. A reload re-executes only the files that changed,
+    so editing sync.py left cli.py's semaphore and gate pinned to the loop that just died
+    and the next sweep died with "bound to a different event loop". An uncontended acquire
+    never binds, which is why this has to fan out wide enough to make waiters."""
+
+    async def sweep():
+        async def one():
+            async with cli.search_gate, cli._sem:  # noqa: SLF001
+                await sleep(0)
+
+        await gather(*(one() for _ in range(40)))
+
+    try:
+        cli.reset_loop_state()  # earlier tests in this file have already contended on both
+        cli.search_gate.stamps.clear()
+        run(sweep())  # cycle one, on its own loop
+
+        with pytest.raises(RuntimeError, match="bound to a different event loop"):
+            run(sweep())  # what the daemon hit: a second loop over cycle one's primitives
+
+        cli.search_gate.stamps.clear()  # this test isolates loop binding, not the rolling budget
+        cli.reset_loop_state()  # what hmr.py now does at the top of every cycle
+        run(sweep())
+    finally:
+        cli.search_gate.stamps.clear()
+        cli.reset_loop_state()  # leave nothing bound to a loop this test closed
+
+
+def test_reset_loop_state_keeps_the_rate_gate_budget():
+    """A reload needs a new lock for the new event loop, but the rolling request timestamps
+    are still live API usage. Clearing them here would grant another 90 search calls inside
+    the same minute and turn a reload into a rate-limit burst."""
+    cli.reset_loop_state()
+    before = cli.search_gate
+    before.stamps.append(monotonic())
+    stamps = list(before.stamps)
+    lock = before.lock
+    cli.reset_loop_state()
+    try:
+        assert cli.search_gate is not before
+        assert list(cli.search_gate.stamps) == stamps
+        assert cli.search_gate.lock is not lock
+    finally:
+        cli.search_gate.stamps.clear()
+        cli.reset_loop_state()

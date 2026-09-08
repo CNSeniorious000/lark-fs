@@ -13,11 +13,14 @@ from re import compile
 from time import monotonic
 from typing import Any
 
+# defined in abort.py, never here: a reload rebinds this module's classes, and then no
+# `except SyncAbortedError` matches an exception raised before it (see abort.py)
+from .abort import Aborted
+
 # The search endpoints rate-limit hard (that is what forced this down to 3), but the
 # per-chat listing does not: 40 chats at 8-way concurrency sustained 88 msg/s with zero
 # 429s, against 10 msg/s before. Raise this only with a measurement, never a guess.
 CONCURRENCY = 8
-_sem = Semaphore(CONCURRENCY)
 
 
 class RateGate:
@@ -50,8 +53,33 @@ class RateGate:
         pass
 
 
-# 90 of the documented 100 a minute, so the retry that follows a refusal has room to land
-search_gate = RateGate(90, 60.0)
+_sem: Semaphore
+search_gate: RateGate
+
+
+def reset_loop_state():
+    """Rebuild the primitives that belong to one event loop.
+
+    asyncio binds a Semaphore or Lock to the loop that first *contends* on it, and hmr.py
+    runs every cycle in its own `asyncio.run`. A reload only re-executes the files that
+    changed, so editing any other module leaves these two pinned to the loop that just
+    died and the next sweep fails with "bound to a different event loop". Constructing
+    them here at cycle boundaries leaves in-flight requests on the same semaphore and
+    gate until they finish. The new gate uses the current methods but retains timestamps:
+    a code reload must not grant a fresh minute of API budget.
+    """
+    global _sem, search_gate
+    _sem = Semaphore(CONCURRENCY)
+    old_gate = globals().get("search_gate")
+    search_gate = RateGate(90, 60.0)  # 90 of the documented 100 a minute, so the retry that follows a refusal has room to land
+    if old_gate is not None:
+        search_gate.stamps = old_gate.stamps
+
+
+# Re-executing this module must not hand out fresh slots while old requests still hold
+# theirs. Only first import initializes here; hmr.py resets after the old cycle has ended.
+if "_sem" not in globals():
+    reset_loop_state()
 
 FEED_LIMIT = 40  # per-group history depth; the TUI decides how much of it to show
 
@@ -202,23 +230,6 @@ RE_MARKUP = compile(r"</?[a-zA-Z][^>]*>")
 RE_PAGE_CAP = compile(r"--page-size \d+: must be between 1 and (\d+)")
 RE_DATE = compile(r"\d{4}-\d{2}-\d{2}")
 RE_CODE = compile(r'"code":\s*(\d+)')
-
-
-class Aborted:
-    """Cooperative stop. Every request is a checkpoint, so a sync interrupts promptly
-    no matter which collection is running."""
-
-    flag = False
-    reason = ""  # why, when it was not a keystroke -- a stop the user cannot act on the same way
-
-    @classmethod
-    def check(cls):
-        if cls.flag:
-            raise SyncAbortedError
-
-
-class SyncAbortedError(Exception):
-    """Raised at a request boundary once a stop has been requested."""
 
 
 class LarkError(Exception):
