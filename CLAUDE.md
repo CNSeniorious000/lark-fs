@@ -58,6 +58,17 @@ Known traps, all hit in practice:
   same conversion, so `GET /im/v1/messages/mget` (a JSON *array* in `--params`, never the
   shortcut's CSV, which is rejected as one malformed id) is the only place either survives.
   Asked only for the 21% that can carry a link — for anything else both fields are null.
+- a thread root answers nothing about whether its thread grew. `+messages-mget` inlines the
+  50 *oldest* replies and sets `thread_has_more` whenever there are more than that, so past
+  the cap all three of its signals are constants: the flag stays true however complete the
+  mirror is, the count stops at 50, and the newest inlined reply is frozen at whatever was
+  50th. Comparing any of them against a walked thread flags it on every run -- 68 threads
+  here, each re-walked forever. Only the thread's own container reports its newest reply.
+  `catch_up_threads` reads that container `desc` and stops at the first id already on disk,
+  so an unchanged thread costs one request and a grown one only the pages that carry the
+  growth. Do not filter which threads to ask by the `last_reply` on disk: that is the stale
+  datum being refreshed, so a thread quiet past the window is dropped from it and then never
+  asked again -- 13824 threads here sit outside a 7-day window in chats that saw later traffic.
 - the chat container never returns thread replies, whatever `only_thread_root_messages`
   says: true, false and omitted all answer identically (measured over the same window).
   Replies exist only inside their root's inlined `thread_replies` or through the thread

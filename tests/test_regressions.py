@@ -3349,3 +3349,134 @@ def test_reset_loop_state_keeps_the_rate_gate_budget():
     finally:
         cli.search_gate.stamps.clear()
         cli.reset_loop_state()
+
+
+async def _noop(*_a, **_k):
+    """`_link_replies` reaches a second endpoint; these tests are about the tail read."""
+
+
+def _mirrored_thread(store, thread: str, chat: str, ids: list[str], last: str):
+    """A thread on disk: a meta plus one file per reply, which is what the tail read stops on."""
+    store.write_yaml(f"chats/{chat}/threads/{thread}/meta.yaml", {"thread_id": thread, "chat_id": chat, "root_message_id": "om_root", "replies": len(ids), "last_reply": last})
+    for mid in ids:
+        store.write_yaml(f"chats/{chat}/threads/{thread}/{mid}.yaml", {"message_id": mid, "create_time": last})
+
+
+def test_replies_arriving_after_the_cursor_passed_a_thread_reach_the_mirror(tmp_path, monkeypatch):
+    """A thread is only written when the sweep passes its root, and the per-chat cursor moves
+    past that root once. Replies arriving afterwards were unreachable by every path: the
+    forward walk never returns behind the cursor, `threads_incomplete` was never set if the
+    inline view was under the cap, and `recheck_messages` replays only ids already on disk.
+    Measured on one live thread: 25 replies mirrored against 154 on the server, and the 20
+    that mentioned the PR being looked for were all in the gap."""
+    from lark_fs import sync as sync_module
+
+    store = Store(tmp_path)
+    _mirrored_thread(store, "omt_1", "oc_1", ["om_old"], "2026-09-09 03:30")
+
+    async def container(*argv, **_k):
+        assert "--order" in argv and argv[argv.index("--order") + 1] == "desc", f"the tail must be read newest-first: {argv}"
+        assert "--no-reactions" in argv, "a page that is usually discarded paid for reaction enrichment"
+        return {"messages": [{"message_id": "om_new", "create_time": "2026-09-10 16:52"}, {"message_id": "om_old", "create_time": "2026-09-09 03:30"}]}
+
+    monkeypatch.setattr(cli, "run", container)
+    monkeypatch.setattr(sync_module, "_link_replies", _noop)
+    assert run(sync_module.catch_up_threads(store, Progress())) == 1
+
+    assert store.read_yaml("chats/oc_1/threads/omt_1/om_new.yaml")["message_id"] == "om_new", "the reply that arrived past the cursor never landed"
+    meta = store.read_yaml("chats/oc_1/threads/omt_1/meta.yaml")
+    assert meta["last_reply"] == "2026-09-10 16:52", f"the thread still reports the reply it had before: {meta}"
+    assert meta["replies"] == 2, f"the count describes less than the directory holds: {meta}"
+
+
+def test_a_settled_thread_costs_one_page_and_no_writes(tmp_path, monkeypatch):
+    """The read is the repair, so it has to stop at the first id already mirrored. Walking
+    on would re-fetch and re-link a whole thread to learn nothing -- which is what judging
+    growth from the root did: `+messages-mget` inlines the 50 *oldest* replies and sets
+    `thread_has_more` whenever there are more, so past the cap the flag is true however
+    complete the mirror is. All 68 threads over 50 replies on this store were re-walked
+    every single run."""
+    from lark_fs import sync as sync_module
+
+    store = Store(tmp_path)
+    _mirrored_thread(store, "omt_1", "oc_1", ["om_a"], "2026-09-09 03:30")
+    before = (tmp_path / "chats/oc_1/threads/omt_1/meta.yaml").stat().st_mtime_ns
+    pages = 0
+
+    async def container(*_argv, **_k):
+        nonlocal pages
+        pages += 1
+        # `has_more` forever, so a walk that does not stop on a mirrored id never terminates.
+        # Failing here rather than hanging: the container of a real thread does end, but a
+        # test that hangs reports nothing about which line broke.
+        assert pages <= 3, "the walk did not stop at the first id already on disk"
+        return {"messages": [{"message_id": "om_a", "create_time": "2026-09-09 03:30"}], "has_more": True, "page_token": "more"}
+
+    monkeypatch.setattr(cli, "run", container)
+    monkeypatch.setattr(sync_module, "_link_replies", _noop)
+    assert run(sync_module.catch_up_threads(store, Progress())) == 0, "a thread with nothing new was reported as caught up"
+    assert pages == 1, f"the walk did not stop at the first mirrored id: {pages} pages"
+    assert (tmp_path / "chats/oc_1/threads/omt_1/meta.yaml").stat().st_mtime_ns == before, "an unchanged thread's meta was rewritten"
+
+
+def test_a_scoped_sweep_does_not_read_every_thread_in_the_store(tmp_path, monkeypatch):
+    """`sync_messages` takes `chat_ids`; a run scoped to one chat must not bill for the tails
+    of every thread in the mirror."""
+    from lark_fs import sync as sync_module
+
+    store = Store(tmp_path)
+    _mirrored_thread(store, "omt_here", "oc_wanted", ["om_a"], "2026-09-09 03:30")
+    _mirrored_thread(store, "omt_elsewhere", "oc_other", ["om_b"], "2026-09-09 03:30")
+    asked: list[str] = []
+
+    async def container(*argv, **_k):
+        asked.append(argv[argv.index("--thread") + 1])
+        return {"messages": [{"message_id": "om_a", "create_time": "2026-09-09 03:30"}]}
+
+    monkeypatch.setattr(cli, "run", container)
+    monkeypatch.setattr(sync_module, "_link_replies", _noop)
+    run(sync_module.catch_up_threads(store, Progress(), chat_ids={"oc_wanted"}))
+    assert asked == ["omt_here"], f"a scoped sweep read outside its scope: {asked}"
+
+
+def test_a_failed_tail_read_leaves_the_thread_alone(tmp_path, monkeypatch):
+    """An error says nothing about the thread. Stamping the sweep or moving `last_reply`
+    anyway would record a thread as current on the strength of a request that never
+    answered, and nothing else will ever revisit it."""
+    from lark_fs import sync as sync_module
+
+    store = Store(tmp_path)
+    _mirrored_thread(store, "omt_1", "oc_1", ["om_a"], "2026-09-09 03:30")
+    asked: list[str] = []
+
+    async def boom(*argv, **_k):
+        asked.append(argv[1])
+        raise cli.LarkError(["im", "+threads-messages-list"], {"error": {"code": 99991400}})
+
+    monkeypatch.setattr(cli, "run", boom)
+    monkeypatch.setattr(sync_module, "_link_replies", _noop)
+    assert run(sync_module.catch_up_threads(store, Progress())) == 0
+    assert asked, "the thread was never asked, so the test proves nothing about the failure"
+    assert store.read_yaml("chats/oc_1/threads/omt_1/meta.yaml")["last_reply"] == "2026-09-09 03:30", "a failed read moved the thread's freshness forward"
+
+
+def test_a_reply_in_the_same_minute_as_the_last_one_is_not_missed(tmp_path, monkeypatch):
+    """`create_time` has minute resolution, so a timestamp compare calls a thread settled when
+    a reply lands in the same minute as the mirrored newest one -- and unlike the chat cursor,
+    which is left unadvanced for exactly this reason, nothing re-reads a thread later, so the
+    miss is permanent. Measured here: 583 of 3363 multi-reply threads already share their
+    newest minute between two or more messages. The walk stops on an id it has, never on a
+    time it has passed."""
+    from lark_fs import sync as sync_module
+
+    store = Store(tmp_path)
+    same = "2026-09-09 03:30"
+    _mirrored_thread(store, "omt_1", "oc_1", ["om_old"], same)
+
+    async def container(*_argv, **_k):
+        return {"messages": [{"message_id": "om_new", "create_time": same}, {"message_id": "om_old", "create_time": same}]}
+
+    monkeypatch.setattr(cli, "run", container)
+    monkeypatch.setattr(sync_module, "_link_replies", _noop)
+    assert run(sync_module.catch_up_threads(store, Progress())) == 1, "a reply sharing the newest minute was read as already mirrored"
+    assert (tmp_path / "chats/oc_1/threads/omt_1/om_new.yaml").exists(), "the same-minute reply never landed"

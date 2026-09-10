@@ -129,6 +129,7 @@ WIKI_WIDTH = 3
 WIKI_HOURS = 24.0
 SEARCH_HOURS = 6.0
 ROSTER_HOURS = 24.0  # one request per chat, 200 on this store
+THREAD_HOURS = 24.0  # one request per thread that has not grown, 14769 on this store -- the whole cost when nothing moved
 PROFILE_HOURS = 168.0  # one per 19 users, and a name or a department moves far more slowly than a roster
 MEETING_SETTLE_DAYS = 7
 # Both search endpoints reject anything above 30 outright, and `paginate`'s default is 50:
@@ -646,6 +647,78 @@ async def repair_thread(store: Store, thread: str, chat: str) -> list[dict]:
     meta = store.read_yaml(f"{at}/meta.yaml")
     store.write_yaml(f"{at}/meta.yaml", {**meta, "replies": len(replies), "has_more": False, "last_reply": max((r.get("create_time") or "" for r in replies), default=meta.get("last_reply", ""))})
     return replies
+
+
+async def catch_up_threads(store: Store, p: Progress, *, chat_ids: set[str] | None = None) -> int:
+    """Read the newest end of every mirrored thread, and write whatever is not on disk yet.
+
+    A thread is only ever written when the sweep passes its *root*, and the per-chat cursor
+    moves past that root once. Every reply arriving afterwards is unreachable by every other
+    path: the forward walk never returns to a root behind the cursor, `threads_incomplete`
+    was never set if the inline view was under the cap at the time, and `recheck_messages`
+    replays ids already on disk -- a reply that never landed has no file to replay. Measured
+    on one live thread, 25 replies mirrored against 154 on the server, and the 20 that
+    mentioned the PR being looked for were all in the gap.
+
+    Nothing on the *root* can answer whether a thread grew. `+messages-mget` inlines the 50
+    *oldest* replies and sets `thread_has_more` whenever there are more than that, so past
+    the cap all three of its signals are constants: the flag is true however complete the
+    mirror is, the count stops at 50, and the newest inlined reply is frozen at whatever was
+    50th. Comparing any of them against a walked thread flags it on every run -- 68 threads
+    on this store, each re-walked forever.
+
+    So the thread's own container is read `desc`, and the read *is* the repair: paging stops
+    at the first id already on disk, which for an unchanged thread is the first page and one
+    request. Growth costs only the pages that carry it, however large the thread -- against a
+    full `repair_thread` walk, which is 4 listing pages plus 4 mget batches for a 165-reply
+    thread that gained one reply. And no freshness filter over `last_reply`: that field is
+    the stale datum being refreshed, so a thread quiet past any window would be dropped from
+    it and then never asked again -- 13824 threads here sit outside a 7-day window in chats
+    that saw later traffic.
+    """
+    threads = [(f.parent.name, f.parents[2].name) for f in sorted(store.root.glob("chats/*/threads/*/meta.yaml"))]
+    if chat_ids is not None:
+        threads = [t for t in threads if t[1] in chat_ids]  # a scoped sweep must not read, or bill for, the whole store
+    if not threads:
+        return 0
+    p.set("threads", state="running", total=len(threads), done=0)
+    caught = 0
+
+    async def tail(item: tuple[str, str]):
+        nonlocal caught
+        thread, chat = item
+        at = f"chats/{chat}/threads/{thread}"
+        fresh: list[dict] = []
+        try:
+            # `--no-reactions`: a settled thread's page is thrown away, and enrichment is a
+            # second request per 20 messages to fetch reactions for messages already on disk.
+            async for m in cli.paginate("im", "+threads-messages-list", "--thread", thread, "--order", "desc", "--no-reactions", key="messages"):
+                if not (mid := m.get("message_id")) or (store.root / at / f"{mid}.yaml").exists():
+                    break  # the newest end is contiguous, so the first id already mirrored ends the walk
+                fresh.append(m)
+        except cli.LarkError:
+            return  # the request failed, not the thread: it is read again next run
+        finally:
+            p.bump("threads", last=f"{caught} threads caught up")
+        if not fresh:
+            return
+        for m in fresh:
+            store.write_yaml(f"{at}/{m['message_id']}.yaml", _clean(m))
+        # every reply in a thread answers something, and for a thread past the inline cap this
+        # is the only writer it will ever get. Raising leaves the files without their links
+        # rather than recording the thread as current when it is not.
+        await _link_replies(store, [(m["message_id"], f"{at}/{m['message_id']}.yaml") for m in fresh])
+        meta = store.read_yaml(f"{at}/meta.yaml")
+        # `replies` counts the files beside it, never what this read returned: a tail stops
+        # above the replies it already had, and a record must not describe less than it holds.
+        on_disk = sum(1 for f in (store.root / at).glob("*.yaml") if f.stem != "meta")
+        store.write_yaml(f"{at}/meta.yaml", {**meta, "replies": on_disk, "last_reply": max((m.get("create_time") or "" for m in fresh), default=meta.get("last_reply", ""))})
+        caught += 1
+
+    await cli.spread(tail, threads)
+    record_sweep(store, "threads")  # after the work, not before: a pass that dies on its first request must come due again sooner than one that finished
+    p.set("threads", state="done", note=f"{caught} of {len(threads)} threads had new replies")
+    return caught
 
 
 async def repair_unreadable(store: Store, chunk: list[tuple[str, str]]) -> list[dict]:
@@ -1938,7 +2011,7 @@ async def sync_wiki(store: Store, p: Progress):
     p.set("wiki", state="done")
 
 
-ALL = ["messages", "chats", "profiles", "docs", "minutes", "meetings", "bases", "wiki", "files"]
+ALL = ["messages", "chats", "threads", "profiles", "docs", "minutes", "meetings", "bases", "wiki", "files"]
 
 
 async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
@@ -1997,6 +2070,13 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
         # the body fetch below it is already incremental; only the search probes are not
         await sync_docs(store, p, search="docs" in asked or not swept_recently(store, "docs", SEARCH_HOURS))
 
+    async def threads():
+        # the message sweep is what creates and extends thread directories, so reading their
+        # tails after it means this run's new roots are included rather than waiting a cycle
+        if messages:
+            await messages
+        await catch_up_threads(store, p)
+
     async def files():
         # the media index is a by-product of the message sweep; on its own it reads
         # whatever is already on disk, which is what `--only files` is for
@@ -2008,6 +2088,8 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
         named["profiles"] = profiles()
     if "docs" in want:
         named["docs"] = docs()
+    if "threads" in want and ("threads" in asked or not swept_recently(store, "threads", THREAD_HOURS)):
+        named["threads"] = threads()
     if "files" in want:
         named["files"] = files()
     if "minutes" in want:

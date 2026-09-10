@@ -129,6 +129,12 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
   A chat still going after 2000 messages has the rest of its range split into 12-hour
   windows that page in parallel — one alert bot's chat holds 181875 messages, which is
   3600+ pages if walked as a single sequence.
+- **threads** are read from their own end, because a chat cursor cannot reach them twice. A
+  thread is written when the sweep passes its root, and replies arriving after the cursor
+  moved on are unreachable by every other path — one live thread here had 25 replies
+  mirrored against 154 on the server. So each thread's container is read newest-first once a
+  day and the walk stops at the first reply already on disk: an unchanged thread costs one
+  request, and a grown one only the pages that carry the growth, whatever its size.
 - **docs / minutes / meetings** re-list metadata (cheap) but skip fetching bodies,
   transcripts and comments for entities already on disk. A doc's body is re-fetched when
   the server's `update_time` passes the copy on disk. Comments have no such signal —
