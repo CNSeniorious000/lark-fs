@@ -181,6 +181,77 @@ def test_an_extension_escape_hatch_beats_the_kind_lists(tmp_path):
     assert _pending(store, Policy({"text"}, 1, [".PROMPT"]), rows) == rows
 
 
+def test_the_npm_shim_is_not_what_runs_the_request(tmp_path, monkeypatch):
+    """PATH serves `scripts/run.js`, whose only job is `execFileSync("../bin/lark-cli", args)`.
+
+    Every request paid a V8 cold start for that hop -- 141ms CPU through the shim against
+    29ms straight to the binary, measured on `--version`, which touches neither network nor
+    auth. The binary always sits beside the shim, so follow the symlink and take it.
+
+    Nothing here names an install layout: `X/bin/lark-cli` resolves to itself, so a PATH
+    already serving the binary is left alone, and a run.js that brought no binary along
+    keeps the name it was found under.
+    """
+    pkg = tmp_path / "pkg"
+    (pkg / "scripts").mkdir(parents=True)
+    (pkg / "bin").mkdir()
+    shim = pkg / "scripts" / "run.js"
+    shim.write_text("console.log('shim')\n")
+    shim.chmod(0o755)  # `which` only finds what is executable, as PATH does
+    native = pkg / "bin" / "lark-cli"
+    native.write_text("#!/bin/sh\n")
+    native.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "lark-cli").symlink_to(shim)
+    monkeypatch.setenv("PATH", str(home))
+
+    assert cli._binary() == str(native), "the symlink's target is a .js shim; the binary beside it is what should run"  # noqa: SLF001
+
+    # a PATH that already serves the binary must not be rewritten into something else
+    monkeypatch.setenv("PATH", str(pkg / "bin"))
+    assert cli._binary() == str(native)  # noqa: SLF001
+
+    # a shim with no binary beside it is still the best answer we have
+    lonely = tmp_path / "lonely"
+    lonely.mkdir()
+    lonely_shim = lonely / "run.js"
+    lonely_shim.write_text("console.log('shim')\n")
+    lonely_shim.chmod(0o755)
+    (home / "lark-cli").unlink()
+    (home / "lark-cli").symlink_to(lonely / "run.js")
+    monkeypatch.setenv("PATH", str(home))
+    assert cli._binary() == str(home / "lark-cli")  # noqa: SLF001
+
+
+def test_run_speaks_to_the_resolved_binary(monkeypatch):
+    """Reaching the resolved path is the whole point; asserting `_binary` alone would not
+    prove `run` ever uses it. A test that never touched the argv would pass while every
+    request still went through node."""
+    sent = []
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b'{"ok": true, "data": {"x": 1}}', b"")
+
+        def kill(self):
+            pass
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*args, **_):
+        sent.append(list(args))
+        return FakeProc()
+
+    monkeypatch.setattr(cli, "BIN", "/opt/fake/bin/lark-cli")
+    monkeypatch.setattr(cli, "create_subprocess_exec", fake_exec)
+    assert run(cli.run("im", "+chat-list")) == {"x": 1}
+    assert sent[0][0] == "/opt/fake/bin/lark-cli", f"argv[0] was {sent[0][0]!r}"
+
+
 def test_the_tenant_host_is_learned_never_hardcoded():
     """Every install has a different one and no API reports it; a baked-in host ships
     one tenant's domain to everybody else."""

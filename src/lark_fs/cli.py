@@ -9,7 +9,9 @@ from html import unescape
 from itertools import count, pairwise
 from json import JSONDecoder
 from os import environ
+from pathlib import Path
 from re import compile
+from shutil import which
 from time import monotonic
 from typing import Any
 
@@ -350,6 +352,32 @@ class LarkError(Exception):
         return self._code == 99991403
 
 
+def _binary() -> str:
+    """What to exec, skipping the npm shim when PATH serves one.
+
+    `lark-cli` on PATH is usually `scripts/run.js` -- a node script whose only real job is
+    `execFileSync("../bin/lark-cli", args)`. Every request paid a V8 cold start for that
+    hop: 141ms CPU through the shim against 29ms straight to the binary, measured on
+    `--version`, which touches neither network nor auth. At CONCURRENCY 8 that is eight
+    node processes spinning while their children do the work.
+
+    The binary always sits beside the shim, so follow the symlink and take it. Nothing
+    here names an install layout: `X/bin/lark-cli` resolves to itself, so a PATH that
+    already serves the binary is left alone, and a run.js that brought no binary along
+    keeps the name it was found under.
+    """
+    found = which("lark-cli") or "lark-cli"
+    real = Path(found).resolve()
+    if real.suffix == ".js":
+        native = real.parent.parent / "bin" / "lark-cli"
+        if native.is_file():
+            return str(native)
+    return found
+
+
+BIN = _binary()
+
+
 def _parse(text: str) -> Any | None:
     """Extract lark-cli's JSON body.
 
@@ -369,7 +397,7 @@ def _parse(text: str) -> Any | None:
 async def run(*argv: str, retries: int = 5, cwd: str | None = None, subject: str = "") -> Any:
     """Run a lark-cli command expecting JSON on stdout. Returns the `data` field."""
     Aborted.check()
-    args = ["lark-cli", *argv, "--format", "json"]
+    args = [BIN, *argv, "--format", "json"]
     delay = 2.0
     for attempt in range(retries):
         # the budget is waited out before a slot is taken, so a search that is only waiting
