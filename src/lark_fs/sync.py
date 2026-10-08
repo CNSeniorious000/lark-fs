@@ -2014,7 +2014,20 @@ async def sync_wiki(store: Store, p: Progress):
 ALL = ["messages", "chats", "threads", "profiles", "docs", "minutes", "meetings", "bases", "wiki", "files"]
 
 
-async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
+def wanted(only: list[str] | None, skip: list[str] | None) -> list[str]:
+    """The collections a run touches, in `ALL`'s order.
+
+    `skip` exists for the wiki walk: it is the one pass that is both periodic and enormous
+    (442 of a run's 1247 requests), so the run that carries it also carries every other
+    pass due in the same window and lands close enough to a scheduler's script timeout to
+    be killed there. A caller that would rather run it on its own clock says `--skip wiki`
+    and asks for it separately; nothing about the pass changes, only who decides when.
+    """
+    leave = set(skip or ())
+    return [c for c in (only or ALL) if c not in leave]
+
+
+async def sync_all(root: Path, p: Progress, only: list[str] | None = None, skip: list[str] | None = None):
     """Run every collection concurrently.
 
     The edges are between the values that are actually needed, not between the passes that
@@ -2033,7 +2046,7 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
     migrate_threads(store)
     migrate_meetings(store)
     migrate_minutes(store)
-    want = set(only or ALL)
+    want = set(wanted(only, skip))
     named: dict[str, Any] = {}  # by the row each one reports under, so a failure lands where it is drawn
 
     # The roster is one request, and it is all the chat pass ever wanted. It used to be
@@ -2046,7 +2059,10 @@ async def sync_all(root: Path, p: Progress, only: list[str] | None = None):
 
     messages = create_task(walk_messages()) if "messages" in want else None
     # `only` names what the caller asked for; a plain sync asks for everything, and that is
-    # the case where the discovery passes are allowed to skip a turn (see swept_recently)
+    # the case where the discovery passes are allowed to skip a turn (see swept_recently).
+    # `skip` must not reach this line. Deriving it from `want` reads as "the caller asked for
+    # every collection bar the skipped one", which turns each of their periodic probes into
+    # an on-demand sweep -- the exact cost the skip was meant to avoid.
     asked = set(only or ())
     walk_wiki = "wiki" in want and ("wiki" in asked or not swept_recently(store, "wiki", WIKI_HOURS))
     wiki = create_task(sync_wiki(store, p)) if walk_wiki else None

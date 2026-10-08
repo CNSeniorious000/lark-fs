@@ -362,6 +362,40 @@ def test_the_roster_pass_does_not_wait_out_the_message_sweep(tmp_path, monkeypat
     assert order.index("chats:done") < order.index("messages:done"), f"roster pass waited for the sweep: {order}"
 
 
+def test_a_skipped_collection_does_not_start(tmp_path, monkeypatch):
+    """The wiki walk is periodic and enormous -- 442 of a run's 1247 requests -- and the run
+    that carries it also carries every other pass due in the same window, which is what put
+    the heaviest ones against a scheduler's script timeout. `--skip wiki` hands that decision
+    to whoever schedules the run, so the walk must not start at all."""
+    from lark_fs.sync import sync_all
+
+    order = _graph_probe(monkeypatch)
+    run(sync_all(tmp_path, Progress(), None, ["wiki"]))
+    assert "wiki:start" not in order, f"the walk ran anyway: {order}"
+    assert "docs:done" in order, "skipping the walk took the pass that reads its output down too"
+
+
+def test_skipping_a_collection_does_not_ask_for_the_others(tmp_path, monkeypatch):
+    """`only` is what turns a periodic pass into an on-demand sweep. Reading `skip` as asking
+    would say the opposite of what it does: `--skip wiki` would sweep every document, minute
+    and meeting in the same run, which is the cost this exists to avoid."""
+    from lark_fs import sync as sync_module
+    from lark_fs.sync import sync_all
+
+    store = Store(tmp_path)
+    record_sweep(store, "docs")
+    store.save_cursors()
+    seen: dict[str, bool] = {}
+
+    async def record_search(*_args, **kw):
+        seen["search"] = kw["search"]
+
+    _graph_probe(monkeypatch)
+    monkeypatch.setattr(sync_module, "sync_docs", record_search)
+    run(sync_all(tmp_path, Progress(), None, ["wiki"]))
+    assert seen["search"] is False, "a skipped collection made the document search read as asked for"
+
+
 def test_an_unnamed_image_is_named_by_its_bytes(tmp_path):
     """Rich-text images carry no filename, so the mirror stores them under the bare key --
     `fd -e jpg` misses them and nothing opens them. Lark reports no content type either,

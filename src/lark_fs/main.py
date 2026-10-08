@@ -11,7 +11,7 @@ from .abort import Aborted, SyncAbortedError
 from .daemon import Schedule, watch
 from .reindex import reindex
 from .store import Store
-from .sync import ALL, sync_all
+from .sync import ALL, sync_all, wanted
 from .tui import print_summary, run_with_tui
 
 
@@ -21,6 +21,7 @@ def build_parser():
     default_root = Path(environ.get("LARK_FS_ROOT") or "lark-data")
     p.add_argument("--root", type=Path, default=default_root, help=f"destination directory (default: {default_root})")
     p.add_argument("--only", nargs="+", choices=ALL, help="sync only these collections")
+    p.add_argument("--skip", nargs="+", choices=ALL, help="leave these collections alone; a skipped pass is no longer swept")
     p.add_argument("--interval", type=float, default=120, help="watch: seconds between message sweeps")
     return p
 
@@ -59,7 +60,9 @@ def main():
         return
 
     try:
-        store = run(run_with_tui(lambda p: sync_all(args.root, p, args.only), args.only))
+        # The drawn rows are not the flags the sync itself reads: `only` is what tells the
+        # periodic passes they may skip a turn, so it has to reach `sync_all` untouched.
+        store = run(run_with_tui(lambda p: sync_all(args.root, p, args.only, args.skip), wanted(args.only, args.skip)))
     except SyncAbortedError, KeyboardInterrupt:
         # cursors are committed per slice, so an interrupted run just resumes next time --
         # unless it stopped for a reason rerunning cannot clear, which only the stop knows
