@@ -8,6 +8,7 @@ from signal import SIGINT, SIGTERM, signal
 from sys import stderr
 
 from .abort import Aborted, SyncAbortedError
+from .cli import session_scope
 from .daemon import Schedule, watch
 from .reindex import reindex
 from .store import Store
@@ -52,7 +53,7 @@ def main():
     if args.command == "watch":
         rows = [*ALL, "recheck", "daemon"]
         try:
-            run(run_with_tui(lambda p: watch(args.root, p, Schedule(messages=args.interval)), rows))
+            run(session_scope(run_with_tui(lambda p: watch(args.root, p, Schedule(messages=args.interval)), rows)))
         except SyncAbortedError, KeyboardInterrupt:
             print(f"\n  stopped: {Aborted.reason}" if Aborted.reason else "\n  stopped", file=stderr)
         print(file=stderr)
@@ -62,7 +63,7 @@ def main():
     try:
         # The drawn rows are not the flags the sync itself reads: `only` is what tells the
         # periodic passes they may skip a turn, so it has to reach `sync_all` untouched.
-        store = run(run_with_tui(lambda p: sync_all(args.root, p, args.only, args.skip), wanted(args.only, args.skip)))
+        store = run(session_scope(run_with_tui(lambda p: sync_all(args.root, p, args.only, args.skip), wanted(args.only, args.skip))))
     except SyncAbortedError, KeyboardInterrupt:
         # cursors are committed per slice, so an interrupted run just resumes next time --
         # unless it stopped for a reason rerunning cannot clear, which only the stop knows
