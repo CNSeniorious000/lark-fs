@@ -246,6 +246,7 @@ def test_run_speaks_to_the_resolved_binary(monkeypatch):
         sent.append(list(args))
         return FakeProc()
 
+    monkeypatch.setattr(cli, "creds", None)  # no readable credentials: the subprocess path is the client
     monkeypatch.setattr(cli, "BIN", "/opt/fake/bin/lark-cli")
     monkeypatch.setattr(cli, "create_subprocess_exec", fake_exec)
     assert run(cli.run("im", "+chat-list")) == {"x": 1}
@@ -1237,13 +1238,9 @@ def test_a_quota_stop_does_not_read_as_a_rerunnable_interruption(monkeypatch):
     monkeypatch.setattr(cli_module.Aborted, "reason", "")
 
     async def quota_spent(*_a, **_k):
-        return b'{"ok": false, "error": {"code": 99991403, "message": "quota"}}', b""
+        return {"ok": False, "error": {"code": 99991403, "message": "quota"}}
 
-    class Proc:
-        returncode = 1
-        communicate = quota_spent
-
-    monkeypatch.setattr(cli_module, "create_subprocess_exec", lambda *_a, **_k: _done(Proc()))
+    monkeypatch.setattr(cli_module, "_exchange", quota_spent)
 
     with pytest.raises(cli.LarkError):
         run(cli_module.run("im", "+chat-list"))
@@ -2123,6 +2120,7 @@ def test_an_error_written_to_stderr_is_still_an_error_with_a_code(monkeypatch):
     async def fake_exec(*_a, **_k):
         return FakeProc()
 
+    monkeypatch.setattr(cli, "creds", None)  # the envelope-on-stderr shape is the subprocess path's
     monkeypatch.setattr(cli, "create_subprocess_exec", fake_exec)
     with pytest.raises(cli.LarkError) as caught:
         run(cli.run("docs", "+fetch", "--doc", "gone"))
@@ -2195,15 +2193,10 @@ def test_the_chat_listing_is_filed_under_the_row_that_asked_for_it(tmp_path, mon
     from lark_fs import cli as cli_module
     from lark_fs.sync import Progress, sync_all
 
-    listing = b'{"ok": true, "data": {"chats": [{"chat_id": "oc_1", "name": "somechat"}], "has_more": false}}'
+    async def listing(*_a, **_k):
+        return {"ok": True, "data": {"chats": [{"chat_id": "oc_1", "name": "somechat"}], "has_more": False}}
 
-    class Proc:
-        returncode = 0
-
-        async def communicate(self):
-            return listing, b""
-
-    monkeypatch.setattr(cli_module, "create_subprocess_exec", lambda *_a, **_k: _done(Proc()))
+    monkeypatch.setattr(cli_module, "_exchange", listing)
     monkeypatch.setattr(cli_module, "activity", cli_module.Activity())
     monkeypatch.setattr(cli_module, "feed_enabled", True)
     cli_module.current_group.set("daemon")  # what the daemon leaves behind between sweeps
@@ -3229,18 +3222,12 @@ def test_the_search_gate_admits_only_the_search():
         async def __aexit__(self, *_):
             pass
 
-    class Proc:
-        returncode = 0
-
-        async def communicate(self):
-            return b'{"ok": true, "data": {}}', b""
-
-    async def _done(x):
-        return x
+    async def answered(*_a, **_k):
+        return {"ok": True, "data": {}}
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(cli, "search_gate", Gate())
-        mp.setattr(cli, "create_subprocess_exec", lambda *_a, **_k: _done(Proc()))
+        mp.setattr(cli, "_exchange", answered)
         run(cli.run("drive", "+search", "--query", ""))
         run(cli.run("im", "+chat-list"))
     assert gated == [("drive", "+search")], f"the gate admitted the wrong requests: {gated}"
@@ -3585,3 +3572,57 @@ def test_a_reply_in_the_same_minute_as_the_last_one_is_not_missed(tmp_path, monk
     monkeypatch.setattr(sync_module, "_link_replies", _noop)
     assert run(sync_module.catch_up_threads(store, Progress())) == 1, "a reply sharing the newest minute was read as already mirrored"
     assert (tmp_path / "chats/oc_1/threads/omt_1/om_new.yaml").exists(), "the same-minute reply never landed"
+
+
+def test_every_request_speaks_to_the_api_not_a_process(monkeypatch):
+    """The whole point of the swap: a call reaches the Open API in-process. Without a test
+    on the argv -> request mapping, `run` could quietly drift back to spawning for some
+    shape and only the process table would ever show it."""
+    sent = []
+
+    async def fake_request(method, path, *, params=None, body=None, as_="user", out=None):  # noqa: ARG001
+        sent.append((method, path, params, body, as_))
+        return {"x": 1}
+
+    monkeypatch.setattr(cli, "creds", object())
+    monkeypatch.setattr(cli, "request", fake_request)
+    assert run(cli.run("api", "GET", "/open-apis/im/v1/chats", "--params", '{"page_size": 5}', "--as", "bot")) == {"x": 1}
+    assert sent == [("GET", "/open-apis/im/v1/chats", {"page_size": 5}, None, "bot")], f"the call went out as {sent!r}"
+
+
+def test_a_chat_listing_is_renamed_the_way_the_caller_reads_it(monkeypatch):
+    """`sync.py` reads `chats` and the endpoint answers `items` -- the one field rename the
+    dispatch owes its callers. A silent miss here yields zero chats and a sync that reports
+    success while mirroring nothing."""
+
+    async def fake_request(_method, path, *, params=None, body=None, as_="user", out=None):  # noqa: ARG001
+        assert path == "/open-apis/im/v1/chats"
+        assert params["types"] == "p2p,group"
+        return {"items": [{"chat_id": "oc_1", "name": "somechat"}], "has_more": False}
+
+    monkeypatch.setattr(cli, "creds", object())
+    monkeypatch.setattr(cli, "request", fake_request)
+    data = run(cli.run("im", "+chat-list", "--types", "p2p,group"))
+    assert [c["chat_id"] for c in data["chats"]] == ["oc_1"]
+
+
+def test_the_message_walk_reads_views_not_the_wire(monkeypatch):
+    """The walk stores message *views* -- rendered content, formatted create_time -- and the
+    wire carries raw bodies. The dispatch has to hand one to the other."""
+    seen = {}
+
+    async def fake_request(_method, _path, *, params=None, body=None, as_="user", out=None):  # noqa: ARG001
+        seen["params"] = params
+        return {"items": [{"message_id": "om_1"}], "has_more": False}
+
+    async def fake_views(items, *, get, reactions=True):  # noqa: ARG001
+        seen["reactions"] = reactions
+        return [{**m, "content": "hello"} for m in items]
+
+    monkeypatch.setattr(cli, "creds", object())
+    monkeypatch.setattr(cli, "request", fake_request)
+    monkeypatch.setattr(cli, "message_views", fake_views)
+    data = run(cli.run("im", "+chat-messages-list", "--chat-id", "oc_1", "--order", "asc", "--no-reactions"))
+    assert data["messages"][0]["content"] == "hello"
+    assert seen["reactions"] is False
+    assert seen["params"]["container_id_type"] == "chat", f"the listing went out against the wrong container: {seen['params']!r}"

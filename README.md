@@ -1,7 +1,8 @@
 # lark-fs
 
-Mirror everything reachable in Feishu/Lark onto disk as a **greppable, ID-addressed file tree**,
-built on top of an already-logged-in [`lark-cli`](https://github.com/larksuite/cli).
+Mirror everything reachable in Feishu/Lark onto disk as a **greppable, ID-addressed file tree**.
+Requests go to the Open API directly, as in-process async calls; the credentials come from
+an already-logged-in [`lark-cli`](https://github.com/larksuite/cli).
 
 ## Install
 
@@ -31,8 +32,10 @@ uv run hmr.py sync   # same thing, but edits to src/ land in the running TUI
 
 ## Authorize
 
-`lark-cli` holds the credentials; this only drives it. A plain `lark-cli auth login` is
-enough to start, and two extra scopes are worth asking for:
+`lark-cli` holds the credentials -- the login flow, the refresh and the keychain are its
+job -- and lark-fs reads its token store and speaks to the API itself, so a sync issues no
+subprocesses. A plain `lark-cli auth login` is enough to start, and two extra scopes are
+worth asking for:
 
 ```sh
 lark-cli auth login --scope "im:chat:read im:chat.members:read"
@@ -178,6 +181,7 @@ Lark rate-limits hard (`99991400`), so a full re-sync is never the plan:
   costs a fixed 60 requests per run and covers everything about once a day.
 - Requests are capped at 8 concurrent and retry with exponential backoff on 429. Each
   collection bounds its own in-flight work, or one of them would own the whole queue.
+  They are aiohttp requests on one pooled session -- no process is spawned per call.
 
 The TUI shows one line per collection plus a live, bun-style list of the requests
 currently on the wire. It stays on the normal screen buffer, so the final frame

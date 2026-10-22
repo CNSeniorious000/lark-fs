@@ -1,7 +1,12 @@
 # lark-fs
 
-Mirrors Feishu/Lark onto disk as a greppable, ID-addressed file tree, driving the
-`lark-cli` binary as a subprocess. See `README.md` for the layout and CLI.
+Mirrors Feishu/Lark onto disk as a greppable, ID-addressed file tree, calling the Lark
+Open API over async HTTP in-process. `lark-cli` is still the credential holder (`auth
+login`, refresh, keychain); `tokens.py` reads its store, and the dispatch table at the
+bottom of `cli.py` is where each lark-cli-shaped command maps to an endpoint. When the
+store cannot be read -- a platform whose keychain is not the local file one -- the old
+subprocess path answers instead, and any argv shape the table does not know falls through
+to it too. See `README.md` for the layout and CLI.
 
 ## Working on this
 
@@ -249,14 +254,14 @@ not one that only shows in a transient state:
   `refresh_interval=0` — no polling. Create that effect only after `run_async` has
   started: `Application.invalidate()` is a no-op while the app is not running.
 - A busy loop makes the process unkillable: the event loop never idles, so the SIGINT
-  handler never runs and ctrl-c does nothing. Symptom is ~90% CPU with zero `lark-cli`
-  children. Check that every `while` around a request actually advances its cursor.
+  handler never runs and ctrl-c does nothing. Symptom is ~90% CPU and no requests on the
+  wire. Check that every `while` around a request actually advances its cursor.
 - Fan out with `cli.spread`, never a bare `gather` over a whole backlog. The global
   semaphore hands out slots FIFO, so thousands of queued waiters from one collection sit
   ahead of every other row and freeze it completely — `docs` held all 8 slots while
   `messages` and `meetings` showed no in-flight requests at all. Bounding in-flight work
-  costs no throughput; the semaphore was always the ceiling. Diagnose it with
-  `pgrep -P <pid>`: if every child is the same subcommand, that is starvation, not a hang.
+  costs no throughput; the semaphore was always the ceiling. The feed is the diagnostic
+  now: one group holding every running row is starvation, not a hang.
 - A single chat can hold more messages than every other one combined (here: 181875, 16x
   the runner-up). Past `SLICE_AFTER` messages the rest of its range is walked as parallel
   `--start`/`--end` windows -- those bounds are exclusive at the top, so windows tile
